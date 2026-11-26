@@ -1796,6 +1796,55 @@ def _mark_ops_alert(issue):
 
 
 
+_NO_CHANGE_MARK = "<!-- ab-no-code-change -->"  # the coder found no code cause; reclassify_ops_alerts keeps it
+
+
+def mark_no_code_change(issue):
+    """Put an issue the coder judged to have no code cause in the ops lane. The ops-alert
+    label alone decides the lane (the scanner skips any issue that carries it), so the
+    result is True exactly when a reread shows both the marker and that label. There is no rollback:
+    the other writes are idempotent and best effort. The body marker goes first (without
+    it nothing else is written), so a
+    repeat or the performance reclassification never sends the issue back to the fixer;
+    dropping automated-fix goes last and only tidies the lane (a leftover one is harmless
+    while ops-alert is on). A write that landed but raised is caught by rereading."""
+    try:
+        getattr(issue, "update", lambda: None)()  # the cached body may predate an operator's edit
+    except Exception as e:  # noqa: BLE001 - never write a stale body over a newer one
+        logger.warning(f"Could not refresh #{getattr(issue, 'number', '?')} before the handoff: {e}")
+        return False
+    body = issue.body or ""
+    try:
+        if _NO_CHANGE_MARK not in body:
+            issue.edit(body=body + "\n" + _NO_CHANGE_MARK)
+    except Exception as e:  # noqa: BLE001 - without the marker the lane is not protected: stop here
+        logger.warning(f"Could not mark #{getattr(issue, 'number', '?')} no-code-change: {e}")
+        return False
+    try:
+        if OPS_ALERT_LABEL not in [lbl.name for lbl in (issue.labels or [])]:
+            repo = getattr(issue, "repository", None)
+            if repo is not None:
+                from github_ops import _ensure_label
+                if not _ensure_label(repo, OPS_ALERT_LABEL):  # a repo that never had one
+                    raise RuntimeError("the ops-alert label does not exist and could not be created")
+            issue.add_to_labels(OPS_ALERT_LABEL)
+    except Exception as e:  # noqa: BLE001 - the write may still have landed: reread below
+        logger.warning(f"Could not hand #{getattr(issue, 'number', '?')} to ops: {e}")
+    try:
+        getattr(issue, "update", lambda: None)()
+        names = [lbl.name for lbl in (issue.labels or [])]
+    except Exception:  # noqa: BLE001 - cannot confirm the lane
+        return False
+    if OPS_ALERT_LABEL not in names or _NO_CHANGE_MARK not in (issue.body or ""):
+        return False
+    if "automated-fix" in names:
+        try:
+            issue.remove_from_labels("automated-fix")
+        except Exception as e:  # noqa: BLE001 - harmless: the scanner skips ops-alert issues
+            logger.warning(f"Could not drop automated-fix on #{getattr(issue, 'number', '?')}: {e}")
+    return True
+
+
 def _unmark_ops_alert(issue):
     """Send an issue back to the fixer: drop ops-alert, add automated-fix. An
     ops-alert label on an issue AB did not file that way is a person's call
@@ -1803,6 +1852,8 @@ def _unmark_ops_alert(issue):
     try:
         names = [lbl.name for lbl in (issue.labels or [])]
         body = issue.body or ""
+        if _NO_CHANGE_MARK in body:
+            return False  # the coder judged it has no code cause; a repeat does not change that
         if OPS_ALERT_LABEL in names and _OPS_SECTION not in body and _OPS_MARK not in body:
             return False
         if "automated-fix" not in names:

@@ -188,7 +188,8 @@ class _Issue:
         self.title, self.body, self.number = title, body, number
 
     def add_to_labels(self, name):
-        self.labels.append(_Label(name))
+        if name not in [lbl.name for lbl in self.labels]:  # idempotent, like GitHub
+            self.labels.append(_Label(name))
 
     def remove_from_labels(self, name):
         self.labels = [lbl for lbl in self.labels if lbl.name != name]
@@ -213,7 +214,7 @@ def _filer(issue):
             return object()
 
     ns = _fns(*names)
-    ns.update({"os": os, "logger": logging.getLogger("t"), "Github": Gh, "redact_identity": str,
+    ns.update({"_NO_CHANGE_MARK": "<!-- ab-no-code-change -->", "os": os, "logger": logging.getLogger("t"), "Github": Gh, "redact_identity": str,
                "load_config": dict, "get_monitored_repos": lambda c: [],
                "MODULE_TYPE_REPO": {"hub": "o/lm"}, "resolve_module_repo": lambda *a: None,
                "recent_deploy_changes": lambda *a: [],
@@ -246,6 +247,109 @@ def test_performance_repeat_on_an_ops_alert_issue_moves_it_to_the_fixer():
     assert [lbl.name for lbl in by_hand.labels] == ["log-detected", "ops-alert"]
 
 
+def test_performance_repeat_keeps_a_no_code_change_handoff_in_ops_alert():
+    issue = _Issue("log-detected", "ops-alert", body="### Operational fault\n<!-- ab-no-code-change -->")
+    ok, _ = _filer(issue)["file_escalated_issue"](
+        "hub", "26 of 72 calls >= 5.0s", "Health check: slow command NW_GET_ARP on agent-network\n",
+        verdict="health-check", config={"GITHUB_TOKEN": "t"})
+    assert ok
+    assert [lbl.name for lbl in issue.labels] == ["log-detected", "ops-alert"]
+
+
+def _handoff(monkeypatch, issue, ensured=None, created=True):
+    ns = _fns("mark_no_code_change")
+    ns.update({"_NO_CHANGE_MARK": "<!-- m -->", "OPS_ALERT_LABEL": "ops-alert",
+               "logger": __import__("logging").getLogger("t")})
+    import sys
+    monkeypatch.setitem(sys.modules, "github_ops", type("G", (), {"_ensure_label": staticmethod(
+        lambda repo, name: (ensured if ensured is not None else []).append(name) or created)}))
+    return ns["mark_no_code_change"](issue)
+
+
+def test_no_code_change_handoff_creates_the_label_and_marks_the_issue(monkeypatch):
+    ensured = []
+    issue = _Issue("automated-fix", "log-detected", body="b")
+    issue.repository = object()
+    assert _handoff(monkeypatch, issue, ensured) is True
+    assert ensured == ["ops-alert"] and "<!-- m -->" in issue.body
+    assert [lbl.name for lbl in issue.labels] == ["log-detected", "ops-alert"]
+
+
+def test_no_code_change_handoff_is_false_when_the_label_cannot_be_added(monkeypatch):
+    class I(_Issue):
+        def add_to_labels(self, name):
+            raise RuntimeError("github 422")
+
+    issue = I("automated-fix", body="b")
+    assert _handoff(monkeypatch, issue) is False
+    assert [lbl.name for lbl in issue.labels] == ["automated-fix"]
+
+
+def test_no_code_change_handoff_fails_when_the_label_cannot_be_created(monkeypatch):
+    issue = _Issue("automated-fix", body="b")
+    issue.repository = object()
+    assert _handoff(monkeypatch, issue, created=False) is False
+    assert [lbl.name for lbl in issue.labels] == ["automated-fix"]
+
+
+def test_no_code_change_handoff_is_true_when_a_landed_write_raised(monkeypatch):
+    class I(_Issue):
+        def add_to_labels(self, name):
+            super().add_to_labels(name)  # GitHub applied it, then the response failed
+            raise RuntimeError("timeout")
+
+    issue = I("automated-fix", body="b")
+    assert _handoff(monkeypatch, issue) is True
+    assert "ops-alert" in [lbl.name for lbl in issue.labels]
+
+
+def test_no_code_change_handoff_is_true_while_ops_alert_is_on_even_if_the_fixer_label_stays(monkeypatch):
+    class I(_Issue):
+        def remove_from_labels(self, name):
+            raise RuntimeError("github 502")
+
+    issue = I("automated-fix", body="b")
+    assert _handoff(monkeypatch, issue) is True  # the scanner skips ops-alert issues
+    assert "ops-alert" in [lbl.name for lbl in issue.labels]
+
+
+def test_no_code_change_handoff_keeps_an_operators_newer_body(monkeypatch):
+    class I(_Issue):
+        def update(self):
+            if not getattr(self, "_seen", False):  # GitHub holds newer text than the cached object
+                self._seen, self.body = True, "operator edit"
+
+    issue = I("automated-fix", body="stale")
+    assert _handoff(monkeypatch, issue) is True
+    assert issue.body.startswith("operator edit") and "<!-- m -->" in issue.body
+
+
+def test_no_code_change_handoff_is_false_when_the_marker_is_gone_at_the_reread(monkeypatch):
+    class I(_Issue):
+        def update(self):
+            self.body = "b"  # another edit removed the marker
+
+    assert _handoff(monkeypatch, I("automated-fix", body="b")) is False
+
+
+def test_no_code_change_handoff_is_false_when_the_lane_cannot_be_reread(monkeypatch):
+    class I(_Issue):
+        def update(self):
+            raise RuntimeError("github 502")
+
+    assert _handoff(monkeypatch, I("automated-fix", body="b")) is False
+
+
+def test_no_code_change_handoff_writes_nothing_else_when_the_marker_write_fails(monkeypatch):
+    class I(_Issue):
+        def edit(self, **kw):
+            raise RuntimeError("github 502")
+
+    issue = I("automated-fix", body="b")
+    assert _handoff(monkeypatch, issue) is False
+    assert [lbl.name for lbl in issue.labels] == ["automated-fix"]
+
+
 def test_reclassify_moves_only_ab_filed_performance_findings():
     """Old ops-alert performance findings that never recur (lm#1929) still reach the fixer."""
     ab_body = "### Operational fault\nThis looks like an environment problem"
@@ -256,21 +360,29 @@ def test_reclassify_moves_only_ab_filed_performance_findings():
     refused = _Issue("ops-alert", title="Health check: slow command Y on z",
                      body=ab_body + "\nx - ERROR - HTTP error 401 Unauthorized", number=4)
 
+    no_change = _Issue("ops-alert", title="Health check: slow command Z on w",
+                       body=ab_body + "\n<!-- ab-no-code-change -->", number=5)
+
     class Repo:
         full_name = "o/lm"
 
         def get_issues(self, labels, state):
             assert labels == ["ops-alert"] and state == "open"
-            return [slow, cert, by_hand, refused]
+            return [slow, cert, by_hand, refused, no_change]
 
     assert _filer(None)["reclassify_ops_alerts"](Repo()) == [1]
     assert [lbl.name for lbl in slow.labels] == ["automated-fix"]
-    for kept in (cert, by_hand, refused):
+    for kept in (cert, by_hand, refused, no_change):
         assert [lbl.name for lbl in kept.labels] == ["ops-alert"]
 
 
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
-            fn()
+            if fn.__code__.co_argcount:  # a test that takes pytest's monkeypatch
+                import pytest
+                with pytest.MonkeyPatch.context() as mp:
+                    fn(mp)
+            else:
+                fn()
     print("ok")
