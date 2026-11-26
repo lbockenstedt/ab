@@ -10,10 +10,10 @@ def _load(client):
     """Exec lm_complete and its map from llm_client.py with a fake hub client."""
     src = Path(__file__).resolve().parents[1].joinpath("llm_client.py").read_text(encoding="utf-8")
     segs = [ast.get_source_segment(src, n) for n in ast.parse(src).body
-            if (isinstance(n, ast.FunctionDef) and n.name in ("lm_complete", "_lm_hub_request", "_lm_try", "lm_pool_only"))
+            if (isinstance(n, ast.FunctionDef) and n.name in ("lm_complete", "_lm_hub_request", "_lm_try", "lm_pool_only", "_fit_lm_prompt"))
             or (isinstance(n, ast.ClassDef) and n.name == "LmPoolUnavailable")
             or (isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") in
-                ("LM_COMPLETE_TIMEOUT_S", "DEFAULT_LM_TASKS"))]
+                ("LM_COMPLETE_TIMEOUT_S", "DEFAULT_LM_TASKS", "LM_PROMPT_MAX_BYTES"))]
     workers = types.ModuleType("workers")
     workers._get_hub_agent_client = lambda: client
     sys.modules["workers"] = workers
@@ -65,3 +65,10 @@ def test_pool_only_waits_then_raises_and_never_returns_none():
     with pytest.raises(ns_cfg["LmPoolUnavailable"]):
         fn_cfg("identify_files", "p", "", {})
     assert len(cfg.sent) == 1
+
+
+def test_oversized_prompt_is_trimmed_to_the_hub_limit():
+    client = _Client({"status": "SUCCESS", "text": "ok"})
+    _load(client)[0]("identify_files", "H" + "x" * 200000 + "T", None, {})
+    sent = client.sent[0][1]["prompt"]
+    assert len(sent.encode()) < 65536 and sent.startswith("H") and sent.endswith("T")
