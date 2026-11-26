@@ -339,7 +339,7 @@ def _llm_confirms_same_issue(new_title, new_body, ex_title, ex_body, ex_number=N
         res = call_llm(
             prompt,
             system_prompt="You are a precise bug-triage assistant. Only return a JSON object.",
-            requirements=reqs,
+            requirements=reqs, lm_task="classify",
         )
         # Pull out the JSON verdict; anything malformed counts as "different".
         match = re.search(r'\{.*\}', res or "", re.DOTALL)

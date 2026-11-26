@@ -14,6 +14,7 @@ package, so AppBuilder can run on hosts that don't have the lm source tree.
 
 # Standard-library imports.
 import asyncio
+import dataclasses
 import collections
 import errno
 import hashlib
@@ -1956,6 +1957,10 @@ class HubAgentClient:
                 # Unknown/absent role falls back to the previous behaviour, so an
                 # older hub that doesn't send one keeps working unchanged.
                 _role = str(data.get("role") or "").strip().lower()
+                # Ask AI is the chat agent: it follows the chat pin (the Sonnet
+                # endpoint the operator pinned), whatever the turn role.
+                from main import load_config  # lazy: main imports this module
+                _chat_pin = (load_config().get("chat_pin") or "").strip() or None
                 if _role == "final":
                     # No tools on this turn by construction, and it is the answer the
                     # user actually reads -- buy the best model available.
@@ -1989,6 +1994,8 @@ class HubAgentClient:
                 # `if err:` was ALWAYS true on a successful tool-turn and every
                 # working call surfaced as {"status": "ERROR", "message":
                 # "tool_calls"}. This is what "Ask AI gives a tool_calls error" was.
+                if _chat_pin:
+                    _help_ask_reqs = dataclasses.replace(_help_ask_reqs, pin_key=_chat_pin)
                 result = await asyncio.to_thread(
                     call_llm, "", system_prompt=system, messages=msgs, tools=tools,
                     requirements=_help_ask_reqs)
