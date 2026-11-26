@@ -43,6 +43,7 @@ def _load_handle_message():
 
     ns = {
         "asyncio": asyncio,
+        "dataclasses": __import__("dataclasses"),
         "uuid": uuid_mod,
         "time": time,
         "logger": _NoLog(),
@@ -76,10 +77,11 @@ def _check(label, cond):
     return cond
 
 
-def _run_help_ask(handle_message, call_llm_stub, tools):
+def _run_help_ask(handle_message, call_llm_stub, tools, chat_pin=""):
     import sys
     fake_main = type(sys)("main")
     fake_main.call_llm = call_llm_stub
+    fake_main.load_config = lambda: {"chat_pin": chat_pin}
     sys.modules["main"] = fake_main
     try:
         fake_self = _FakeSelf()
@@ -131,6 +133,19 @@ def main():
     reqs2 = kw2.get("requirements")
     ok &= _check("HELP_ASK: needs_tools=False when hub supplies no tools",
                  reqs2 is not None and reqs2.needs_tools is False)
+
+    # ---- 3. the chat pin overrides the picker for every turn ----
+    captured3 = {}
+
+    def _capturing_call_llm3(prompt, **kwargs):
+        captured3["kwargs"] = kwargs
+        return {"text": "an answer", "tool_calls": []}
+
+    _run_help_ask(handle_message, _capturing_call_llm3, tools=None, chat_pin="anthropic||claude-sonnet-5.5")
+    reqs3 = captured3.get("kwargs", {}).get("requirements")
+    ok &= _check("HELP_ASK: pin_key follows chat_pin",
+                 reqs3 is not None and reqs3.pin_key == "anthropic||claude-sonnet-5.5")
+    ok &= _check("HELP_ASK: no pin when chat_pin is empty", reqs2.pin_key is None)
 
     print()
     if ok:

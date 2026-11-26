@@ -670,7 +670,7 @@ def analyze_logs_for_errors(logs):
                                min_context_tokens=len(prompt) // 4)
         # Ask the LLM and pull out the JSON array.
         res = call_llm(prompt, system_prompt="You are a log analysis expert. Return only a JSON array.",
-                       requirements=reqs)
+                       requirements=reqs, lm_task="log_review")
         parsed = _first_json_array_of_objects(res or "")
         if parsed is None:
             logger.warning(
