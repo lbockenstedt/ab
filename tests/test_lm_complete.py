@@ -1,6 +1,7 @@
 """lm_complete tries the LM hub only for mapped, prompt-only work and falls through on any miss."""
 import ast
 import sys
+import time as _time
 import types
 from pathlib import Path
 
@@ -9,15 +10,17 @@ def _load(client):
     """Exec lm_complete and its map from llm_client.py with a fake hub client."""
     src = Path(__file__).resolve().parents[1].joinpath("llm_client.py").read_text(encoding="utf-8")
     segs = [ast.get_source_segment(src, n) for n in ast.parse(src).body
-            if (isinstance(n, ast.FunctionDef) and n.name in ("lm_complete", "_lm_hub_request"))
+            if (isinstance(n, ast.FunctionDef) and n.name in ("lm_complete", "_lm_hub_request", "_lm_try", "lm_pool_only"))
+            or (isinstance(n, ast.ClassDef) and n.name == "LmPoolUnavailable")
             or (isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") in
                 ("LM_COMPLETE_TIMEOUT_S", "DEFAULT_LM_TASKS"))]
     workers = types.ModuleType("workers")
     workers._get_hub_agent_client = lambda: client
     sys.modules["workers"] = workers
-    ns = {"logger": types.SimpleNamespace(info=lambda *a, **k: None)}
+    ns = {"logger": types.SimpleNamespace(info=lambda *a, **k: None),
+          "time": types.SimpleNamespace(monotonic=_time.monotonic, sleep=lambda s: None)}
     exec("\n".join(segs), ns)
-    return ns["lm_complete"]
+    return ns["lm_complete"], ns
 
 
 class _Client:
@@ -33,14 +36,32 @@ class _Client:
 
 def test_success_uses_mapped_task_and_joins_system_prompt():
     client = _Client({"status": "SUCCESS", "text": " [] "})
-    assert _load(client)("identify_files", "p", "sys", {}) == " [] "
+    assert _load(client)[0]("identify_files", "p", "sys", {}) == " [] "
     assert client.sent == [("LLM_COMPLETE", {"task": "scout", "prompt": "sys\n\np"})]
 
 
-def test_unmapped_disabled_and_failed_calls_fall_through():
+def test_unmapped_disabled_and_failed_calls_fall_through_when_pool_only_is_off():
     client = _Client({"status": "ERROR", "code": "no_capacity"})
-    fn = _load(client)
-    assert fn("identify_files", "p", "", {}) is None
-    assert fn("chat", "p", "", {}) is None and len(client.sent) == 1
+    fn = _load(client)[0]
+    off = {"lm_pool_only": False}
+    assert fn("identify_files", "p", "", off) is None
+    assert fn("chat", "p", "", off) is None and len(client.sent) == 1
     assert fn("identify_files", "p", "", {"lm_llm_tasks": {}}) is None and len(client.sent) == 1
-    assert _load(None)("identify_files", "p", "", {}) is None
+    assert _load(None)[0]("identify_files", "p", "", off) is None
+
+
+def test_pool_only_waits_then_raises_and_never_returns_none():
+    import pytest
+    client = _Client({"status": "ERROR", "code": "no_capacity"})
+    fn, ns = _load(client)
+    with pytest.raises(ns["LmPoolUnavailable"]):
+        fn("identify_files", "p", "", {"lm_pool_wait_s": 0})
+    fn_none, ns_none = _load(None)
+    with pytest.raises(ns_none["LmPoolUnavailable"]):
+        fn_none("identify_files", "p", "", {"lm_pool_wait_s": 0})
+    # A misconfigured hub raises at once instead of waiting.
+    cfg = _Client({"status": "ERROR", "code": "not_configured"})
+    fn_cfg, ns_cfg = _load(cfg)
+    with pytest.raises(ns_cfg["LmPoolUnavailable"]):
+        fn_cfg("identify_files", "p", "", {})
+    assert len(cfg.sent) == 1
