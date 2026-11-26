@@ -52,9 +52,14 @@ def _is_lmstudio(provider):
     return (provider or "").lower().strip().startswith("lmstudio")
 
 
+def _is_lm_pool(provider):
+    """True for the LM worker-pool provider."""
+    return (provider or "").lower().strip() == "lm_pool"
+
+
 def is_local_provider(provider):
-    """True for self-hosted Ollama or LM Studio, not hosted inference."""
-    return _is_lmstudio(provider) or (_is_ollama(provider) and not _is_ollama_cloud(provider))
+    """True for self-hosted Ollama, LM Studio or the LM worker pool, not hosted inference."""
+    return _is_lm_pool(provider) or _is_lmstudio(provider) or (_is_ollama(provider) and not _is_ollama_cloud(provider))
 
 
 def is_nokey_provider(provider):
@@ -173,6 +178,11 @@ DEFAULT_MODEL_RULES = [
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
      "speed_tier": "fast", "enabled": True, "notes": ""},
+    {"id": "lm-pool", "provider": "lm_pool", "match": "*", "label": "LM worker pool (local CPU models)",
+     "cost_tier": "free", "max_complexity": "medium", "context_window": 32768,
+     "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": False, "supports_batch": False, "supports_streaming": False,
+     "speed_tier": "slow", "enabled": True, "notes": "model = pool task (scout, review, coding, ...); queued on CPU workers via the hub"},
     {"id": "claude-cli", "provider": "claude_cli", "match": "*", "label": "Claude CLI (session auth)",
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 200000,
      "supports_tools": False, "native_agentic_tools": True, "supports_mutating_agent": True,
@@ -708,6 +718,13 @@ def upgrade_copilot_model_rules(rules):
     upgrade — an operator's own copilot rule for the same match is left
     untouched."""
     return _append_missing_default_rules(rules, _COPILOT_MODEL_RULE_IDS)
+
+
+def upgrade_lm_pool_rule(rules):
+    """Return (new_rules, added_ids): a COPY of `rules` with the LM worker-pool rule appended.
+
+    Append-only and idempotent, like the other per-provider upgrades."""
+    return _append_missing_default_rules(rules, frozenset({"lm-pool"}))
 
 
 #: Per-model ollama_cloud capability rules (see DEFAULT_MODEL_RULES). Appended
