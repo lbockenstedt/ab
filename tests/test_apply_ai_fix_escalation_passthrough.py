@@ -80,6 +80,10 @@ class _LlmClientStub:
     class LLMCreditExhausted(Exception):
         pass
 
+    @staticmethod
+    def lm_complete(*a, **k):
+        return None
+
 
 def main():
     ok = True
