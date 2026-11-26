@@ -63,7 +63,7 @@ def _load_ns():
         "_request_copilot": _unexpected, "_request_anthropic": _unexpected,
         "_request_google": _unexpected, "_request_ollama": _unexpected,
         "_request_openai": _unexpected,
-        "_is_copilot": _is_copilot, "_is_ollama": _is_ollama, "_is_lmstudio": _is_lmstudio,
+        "_is_copilot": _is_copilot, "_is_ollama": _is_ollama, "_is_lmstudio": _is_lmstudio, "_is_lm_pool": lambda p: p == "lm_pool",
         "_normalize_lmstudio_url": _normalize_lmstudio_url,
         "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1", "OPENROUTER_HEADERS": {},
     }
