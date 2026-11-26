@@ -9,7 +9,7 @@ def _load(client):
     """Exec lm_complete and its map from llm_client.py with a fake hub client."""
     src = Path(__file__).resolve().parents[1].joinpath("llm_client.py").read_text(encoding="utf-8")
     segs = [ast.get_source_segment(src, n) for n in ast.parse(src).body
-            if (isinstance(n, ast.FunctionDef) and n.name == "lm_complete")
+            if (isinstance(n, ast.FunctionDef) and n.name in ("lm_complete", "_lm_hub_request"))
             or (isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") in
                 ("LM_COMPLETE_TIMEOUT_S", "DEFAULT_LM_TASKS"))]
     workers = types.ModuleType("workers")

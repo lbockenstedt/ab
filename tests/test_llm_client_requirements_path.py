@@ -31,7 +31,7 @@ def _load_ns():
         "_iter_configured_endpoints", "_enumerate_candidates", "_configured_entries",
         "_try_candidate", "_call_llm_with_requirements", "_is_tool_unsupported_400",
         "_model_key", "get_llm_perf_snapshot", "_get_llm_perf_store",
-        "_provider_configured", "_provider_is_nokey", "_is_ollama", "_is_ollama_cloud", "_is_lmstudio",
+        "_provider_configured", "_provider_is_nokey", "_is_ollama", "_is_ollama_cloud", "_is_lmstudio", "_is_lm_pool",
         "_routed_model_dead", "_get_category_semaphore",
         # per-entry health (lm#452/#469/#444: a hard-failing entry must be
         # EXCLUDED from the picker's pool, not just visible in Settings —

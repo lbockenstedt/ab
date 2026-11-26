@@ -49,6 +49,8 @@ from main import (
     _atomic_write_json,
     _any_provider_available,
     _get_provider_config,
+    LM_POOL_TASKS,
+    _is_lm_pool,
     _is_lmstudio,
     _is_ollama,
     _llm_cb_snapshot,
@@ -138,6 +140,9 @@ def _probe_endpoint_online(provider, api_key, model, base_url, label="endpoint")
             return r.returncode == 0
         except Exception:
             return False
+    if _is_lm_pool(p):
+        # The pool is reached through the hub: online means a hub client exists.
+        return bool(model) and _get_hub_agent_client() is not None
     if _is_lmstudio(p):
         # LM Studio needs no API key — just confirm the local server is reachable.
         if not model:
@@ -2369,6 +2374,9 @@ def _fetch_models_for_provider(provider, api_key, base_url):
             error = f"Copilot models — {_model_fetch_reason(e)}"
             logger.warning(f"Copilot model fetch failed: {error} [{type(e).__name__}]")
         return {"models": out, "error": error}
+    if _is_lm_pool(p):
+        # The models are the pool tasks the hub's AppBuilder work rule can allow.
+        return {"models": [{"name": t, "details": "LM worker pool"} for t in LM_POOL_TASKS], "error": ""}
     if _is_lmstudio(p):
         # LM Studio exposes /v1/models (OpenAI-compatible); no auth key needed.
         base = _normalize_lmstudio_url(base_url).rstrip("/")
@@ -2596,7 +2604,7 @@ __EXCLUDE = {"git", "json", "os", "py_compile", "requests", "time",
              "GithubException", "main",
              "ANTHROPIC_API_VERSION", "ANTHROPIC_BASE_URL", "GOOGLE_BASE_URL",
              "OPENAI_BASE_URL", "CONFIG_DIR", "SELF_SCAN_OFFSET_FILE",
-             "_any_provider_available", "_get_provider_config", "_is_lmstudio", "_is_ollama",
+             "LM_POOL_TASKS", "_any_provider_available", "_get_provider_config", "_is_lm_pool", "_is_lmstudio", "_is_ollama",
              "_llm_cb_snapshot", "_local_health_url", "_normalize_lmstudio_url",
              "_provider_configured", "_provider_credit_cb_snapshot",
              "_set_update_cooldown", "get_log_path", "get_version", "load_config",
