@@ -30,6 +30,7 @@ def _model_stage_rows(config, model_options):
         rows.append({"stage": key, "field": f"model_stage_{key}", "label": label, "help": help_,
                      "value": ", ".join(stage_models.patterns(config, key)),
                      "default": ", ".join(default), "models": model_options,
+                     "overridden": tuple(stage_models.patterns(config, key)) != tuple(default),
                      "suited": stage_models.SUITED.get(key, ""),
                      "ladder": stage_models.ladder(config, key)})
     return rows

@@ -40,6 +40,8 @@ def test_settings_rows_and_save_clear_default():
     import routes
     rows = routes._model_stage_rows({}, ["claude-opus-5"])
     assert [r["stage"] for r in rows] == ["diag_identify", "diag_fix"] and rows[1]["value"]
+    assert not rows[0]["overridden"]
+    assert routes._model_stage_rows({"diagnostic_identify_models": ["gpt-5.5"]}, [])[0]["overridden"]
 
 
 def test_used_up_stage_falls_back_to_the_given_floor(monkeypatch):
