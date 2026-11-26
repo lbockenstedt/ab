@@ -3848,6 +3848,16 @@ async def save_settings(request: Request):
     config_data["FIX_MODEL_LADDER"] = data.get("FIX_MODEL_LADDER") == "on"
     # Review model ladder on or off (fix_engine._review_ladder).
     config_data["REVIEW_MODEL_LADDER"] = data.get("REVIEW_MODEL_LADDER") == "on"
+    # Model-policy overrides (blank = use .github/model-policy.json): who reviews, who
+    # writes, and the bar. A bad confidence is dropped, never saved.
+    for _k in ("REVIEW_LADDER_MODELS", "REVIEW_FRONTIER_FOR_CLAUDE", "REVIEW_FRONTIER_FOR_OTHER",
+               "FIX_LADDER_MODELS"):
+        config_data[_k] = str(data.get(_k) or "").strip()[:300]
+    try:
+        _pc = str(data.get("REVIEW_PASS_CONFIDENCE") or "").strip()
+        config_data["REVIEW_PASS_CONFIDENCE"] = str(max(0.9, min(1.0, float(_pc)))) if _pc else ""
+    except ValueError:
+        config_data["REVIEW_PASS_CONFIDENCE"] = ""
     # Per-model PR fix result recording on or off (fix_outcomes.enabled).
     config_data["FIX_OUTCOMES_ENABLED"] = data.get("FIX_OUTCOMES_ENABLED") == "on"
     # Azure fleet access (chat tools + the Azure VM health check) and its mutation gate.

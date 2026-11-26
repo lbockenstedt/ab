@@ -96,6 +96,9 @@ CHAT_CONFIG_DEFAULTS = {
     # Then one frontier reviewer from another vendor gives the final verdict,
     # which passes only at 0.90 or more. Off = the multi-reviewer allowlist panel.
     "REVIEW_MODEL_LADDER": True,
+    # Model-policy overrides edited in Settings; blank = the value in .github/model-policy.json.
+    "REVIEW_LADDER_MODELS": "", "REVIEW_FRONTIER_FOR_CLAUDE": "", "REVIEW_FRONTIER_FOR_OTHER": "",
+    "REVIEW_PASS_CONFIDENCE": "", "FIX_LADDER_MODELS": "",
     # The FIX_OUTCOMES_ENABLED knob: record each PR fix attempt per model
     # (fix_outcomes.py). Off = nothing is written and /fix_outcomes is empty.
     "FIX_OUTCOMES_ENABLED": True,
