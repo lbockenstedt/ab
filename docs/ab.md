@@ -239,7 +239,7 @@ task fails at once. A fix runs on the pool on every attempt, retries included.
 With `lm_pool_only` false, a miss continues with the normal providers. The hub owns the tenant and task allowlist
 (`llm_ab_work`, see `docs/llm.md` in lm).
 
-**Settings → Model policy** (diagnostic issues) lists, for each stage, the configured models it may use in the order the picker tries them: free local models first, then cheap, then frontier. By default, "find the files" allows the pool's `reasoning` then `scout` tasks ahead of Sonnet and Opus, and "write the fix" allows `coding` then `reasoning` ahead of Opus. Each field is still an allowlist; the table beside it shows the effective order.
+**Settings → Model policy** (diagnostic issues) lists, for each stage, the configured models it may use in the order the picker tries them: free local models first, then cheap, then frontier. By default, "find the files" allows the pool's `scout` task ahead of Sonnet and Opus, and "write the fix" allows `coding` ahead of Opus. `reasoning` (DeepSeek R1, slow, one big VM) is not a default for either; add it to a stage only if that stage needs it. Each field is still an allowlist; the table beside it shows the effective order.
 
 LM-pool calls run in parallel: they skip the per-model lock and use their own picker limit `LM_POOL_MAX_CONCURRENT` (default 6) instead of `LLM_MAX_CONCURRENT`; the hub queues and spreads the jobs over its workers.
 

@@ -21,12 +21,12 @@ DIAGNOSTIC_MARKER = "verdict: `health-check`"
 STAGES: Dict[str, Tuple[str, Tuple[str, ...], str, str]] = {
     "diag_identify": (
         "diagnostic_identify_models",
-        ("reasoning", "scout", "claude-sonnet-5.5*", "claude-opus-5*", "claude-opus-6*"),
+        ("scout", "claude-sonnet-5.5*", "claude-opus-5*", "claude-opus-6*"),
         "Diagnostic issues: find the files",
         "Models allowed to decide which files a health-check finding points at. The default "
         "ordinary file-finding step uses the cheapest capable model, which can pick the wrong repo."),
     "diag_fix": (
-        "diagnostic_fix_models", ("coding", "reasoning", "claude-opus-5*", "claude-opus-6*"),
+        "diagnostic_fix_models", ("coding", "claude-opus-5*", "claude-opus-6*"),
         "Diagnostic issues: write the fix",
         "Models allowed to write the first fix attempt for a health-check finding (root cause "
         "spans hub, spokes and feeders). Ordinary issues keep the normal fix ladder."),
@@ -36,8 +36,8 @@ STAGES: Dict[str, Tuple[str, Tuple[str, ...], str, str]] = {
 # Pool tasks (free, local) and the stage each suits; shown next to the stage so the
 # operator knows what to add. A pool entry's model is its task name.
 SUITED = {
-    "diag_identify": "Best: reasoning (DeepSeek R1 70B), then scout (Qwen 3.8). Cloud: Sonnet, Opus.",
-    "diag_fix": "Best: coding (Qwen 3.6 coder), then reasoning. Cloud: Opus-class only.",
+    "diag_identify": "Best: scout (Qwen 3.8, read-only search). Cloud: Sonnet, Opus.",
+    "diag_fix": "Best: coding (Qwen 3.6 coder). Cloud: Opus-class only. Add reasoning (DeepSeek R1, slow) only to a stage that needs it.",
 }
 
 
