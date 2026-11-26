@@ -526,18 +526,27 @@
     {% elif _tab == 'settings' %}
     <!-- Settings sub-tabs, the same strip as Diagnostics: a tab shows its section and hides the rest. -->
     <div class="hpe-subnav flex-none">
-        <div class="ab-wrap px-6 flex gap-6 text-sm overflow-x-auto">
+        <div class="ab-wrap px-6 flex gap-4 text-sm overflow-x-auto items-center">
+            <span class="text-[10px] uppercase tracking-wide text-slate-400 select-none">Connect</span>
             <button type="button" class="sub-nav-item active py-2.5 whitespace-nowrap select-none" data-tab="sec-github" onclick="settingsTab('sec-github')">GitHub</button>
-            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-llm" onclick="settingsTab('sec-llm')">LLM</button>
+            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-sso" onclick="settingsTab('sec-sso')">Sign-in (SSO)</button>
+            <span class="text-slate-300 select-none">|</span>
+            <span class="text-[10px] uppercase tracking-wide text-slate-400 select-none">Models</span>
+            <button type="button" title="Providers, API keys and the model list" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-llm" onclick="settingsTab('sec-llm')">LLM Providers</button>
             <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-local-llm" onclick="settingsTab('sec-local-llm')">Local LLM</button>
             <button type="button" title="Model Registry — the capability and cost rules that rank every enabled endpoint. Edit each rule with labelled dropdowns instead of raw JSON." class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-model-registry" onclick="settingsTab('sec-model-registry')">Model Registry</button>
-            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-qa" onclick="settingsTab('sec-qa')">QA</button>
-            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-automation" onclick="settingsTab('sec-automation')">Automation</button>
-            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-sso" onclick="settingsTab('sec-sso')">Sign-in (SSO)</button>
+            <button type="button" title="Which models are tried first, and the reserved premium models" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-model-policy" onclick="settingsTab('sec-model-policy')">Model Policy</button>
+            <span class="text-slate-300 select-none">|</span>
+            <span class="text-[10px] uppercase tracking-wide text-slate-400 select-none">Pipeline</span>
+            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-scheduler" onclick="settingsTab('sec-scheduler')">Scheduler</button>
+            <button type="button" title="PR pre-review and verification" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-qa" onclick="settingsTab('sec-qa')">PR Review</button>
+            <button type="button" title="Fixing, labels, hub agent and deployment" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-automation" onclick="settingsTab('sec-automation')">Fix &amp; Deploy</button>
+            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-feature-drive" onclick="settingsTab('sec-feature-drive')">Feature Auto-Drive</button>
+            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-promotion" onclick="settingsTab('sec-promotion')">Promotion</button>
+            <span class="text-slate-300 select-none">|</span>
+            <span class="text-[10px] uppercase tracking-wide text-slate-400 select-none">Operate</span>
             <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-monitoring" onclick="settingsTab('sec-monitoring')">Monitoring</button>
             <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-chat" onclick="settingsTab('sec-chat')">Chat</button>
-            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-scheduler" onclick="settingsTab('sec-scheduler')">Scheduler</button>
-            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-feature-drive" onclick="settingsTab('sec-feature-drive')">Feature Auto-Drive</button>
         </div>
     </div>
     {% endif %}
@@ -1915,7 +1924,7 @@
                     <section id="sec-qa" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-vial text-slate-500"></i>
-                            <h4 class="text-sm font-bold text-slate-500">QA & Verification</h4>
+                            <h4 class="text-sm font-bold text-slate-500">PR Review &amp; Verification</h4>
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div class="space-y-2 col-span-1 md:col-span-2">
@@ -2063,7 +2072,7 @@
                     <section id="sec-automation" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-robot text-slate-500"></i>
-                            <h4 class="text-sm font-bold text-slate-500">Automation & Deployment</h4>
+                            <h4 class="text-sm font-bold text-slate-500">Fix &amp; Deploy</h4>
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div class="space-y-2">
@@ -2474,9 +2483,6 @@
                                             <div class="flex justify-end pt-6 mt-2">
                             <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
                         </div>
-                        <div class="flex justify-end pt-6 mt-2">
-                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
-                        </div>
                     </section>
 
                     <!-- Chat Agent -->
@@ -2722,6 +2728,7 @@
                             <i class="fas fa-magic text-slate-500"></i>
                             <h4 class="text-sm font-bold text-slate-500">Feature Auto-Drive</h4>
                         </div>
+                        <p class="text-xs text-slate-600 mb-4">Turns approved feature requests into pull requests in three steps: <strong>Intake</strong> (which requests are picked up), <strong>Build</strong> (how the PR is made) and <strong>Auto-Merge</strong> (optional, unattended). Which models do the work is on the <strong>Model Policy</strong> tab; branch promotion is on the <strong>Promotion</strong> tab.</p>
                         <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200 mb-4">
                             <input type="checkbox" name="feature_drive_enabled" id="feature_drive_enabled" {{ 'checked' if settings.get('feature_drive_enabled', False) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                             <label for="feature_drive_enabled" class="text-xs font-medium text-slate-700" title="Off by default. When on, LM feature requests that clear admin-approval are classified as build/flag/clarify each scan cycle. A 'build' verdict runs the mutating agent and opens a PR — it always still needs a human Approve+Merge unless auto-merge is separately enabled below.">
@@ -2874,8 +2881,29 @@
                             {% endif %}
                         </div>
 
+                        <div class="flex justify-end pt-6 mt-2">
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
+                        </div>
+                    </section>
+
+                    <section id="sec-model-policy" data-settings-section hidden>
+                        <div class="flex items-center gap-2 mb-2 pb-2 border-b border-slate-200">
+                            <i class="fas fa-layer-group text-slate-500"></i>
+                            <h4 class="text-sm font-bold text-slate-500">Model Policy</h4>
+                        </div>
+                        <p class="text-xs text-slate-600 mb-4">Which models do which work, and in what order. Providers and keys are on the <strong>LLM</strong> tab; this tab only decides who is tried first.</p>
+                        <div class="p-4 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-700 space-y-1">
+                            <div class="font-semibold text-slate-800">How AppBuilder picks a model</div>
+                            <ol class="list-decimal ml-5 space-y-0.5">
+                                <li><strong>Local first.</strong> Free pool models (scout, coding, review) are always tried before any paid model.</li>
+                                <li><strong>Cheap cloud next,</strong> then frontier models, only when the local ones are down or fail.</li>
+                                <li><strong>Premium last.</strong> The reserved top-tier models get one final turn after everything else has failed.</li>
+                            </ol>
+                            <div>A model that is down, rate-limited or out of credit is skipped automatically. The tables below show the resulting order.</div>
+                        </div>
+
                         <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
-                            <label for="pr_remediate_stall_limit" class="text-sm font-semibold text-slate-700">Stop when fixes stop helping</label>
+                            <label for="pr_remediate_stall_limit" class="text-sm font-semibold text-slate-700">Pull-request fix loop: when to stop</label>
                             <p class="text-xs text-slate-500">A reviewed head makes progress when more panels approve than in the PR's best review, or as many approve and the lowest confidence rises by at least the minimum gain. After this many heads in a row without progress (review thrash), or once the attempts run out, AppBuilder reworks the change once, end to end, from every round's panel findings. If the rework does not make progress either, it leaves the PR for a human. 0 turns off the thrash check; the attempt limit still applies. Default 2.</p>
                             <input type="number" name="pr_remediate_stall_limit" id="pr_remediate_stall_limit" min="0" step="1" value="{{ settings.get('pr_remediate_stall_limit', 2) }}" class="w-28 p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-2">
@@ -2929,7 +2957,7 @@
                         </div>
 
                         <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
-                            <label class="text-sm font-semibold text-slate-700">Model policy <span class="text-slate-500 font-normal">(which models handle hub health-check findings)</span></label>
+                            <label class="text-sm font-semibold text-slate-700">Hub health-check findings: model ladder <span class="text-slate-500 font-normal">(tried top to bottom)</span></label>
                             <p class="text-xs text-slate-500">Health-check findings are diagnosis problems, so these stages use stronger models than ordinary issues. Each field is a comma-separated list of model names or wildcards. <strong>When a new model is released, add its name or a wildcard here</strong>; leave a field blank to go back to the default.</p>
                             {% for st in model_stages %}
                             <div class="space-y-1 mt-2">
@@ -2962,7 +2990,17 @@
                             <p class="text-xs text-amber-700">If none of the configured models match a list, AppBuilder logs a warning and uses the normal model pool rather than stopping.</p>
                         </div>
 
-                        <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
+                        <div class="flex justify-end pt-6 mt-2">
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
+                        </div>
+                    </section>
+
+                    <section id="sec-promotion" data-settings-section hidden>
+                        <div class="flex items-center gap-2 mb-2 pb-2 border-b border-slate-200">
+                            <i class="fas fa-code-branch text-slate-500"></i>
+                            <h4 class="text-sm font-bold text-slate-500">Promotion</h4>
+                        </div>
+                        <div class="space-y-2">
                             <label class="text-sm font-semibold text-slate-700">Scheduled Promotion <span class="text-slate-500 font-normal">(opens dev→qa / qa→main PRs on a cadence — never merges)</span></label>
                             <div class="flex items-center gap-3">
                                 <input type="checkbox" name="promote_schedule_enabled" id="promote_schedule_enabled" {{ 'checked' if settings.get('promote_schedule_enabled', False) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
