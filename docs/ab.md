@@ -239,6 +239,8 @@ task fails at once. A fix runs on the pool on every attempt, retries included.
 With `lm_pool_only` false, a miss continues with the normal providers. The hub owns the tenant and task allowlist
 (`llm_ab_work`, see `docs/llm.md` in lm).
 
+LM-pool calls run in parallel: they skip the per-model lock and use their own picker limit `LM_POOL_MAX_CONCURRENT` (default 6) instead of `LLM_MAX_CONCURRENT`; the hub queues and spreads the jobs over its workers.
+
 The review ladder seats two LM passes ahead of the cloud filter: `review`
 (Qwen), then `review_deep` (DeepSeek). A Reject from either returns the findings to
 the coder and skips the later seats; an unavailable pass is skipped. Only the
