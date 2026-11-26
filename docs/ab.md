@@ -231,9 +231,12 @@ AB tries the LM-hosted local models before any cloud provider, over the mTLS
 the default routes `triage`, `identify_files` and `classify` to `scout`,
 `log_review` and `log_analysis` to `summary`, `pr_summary` to `pr_summary` and
 the fix generator (`fix`) to `coding`. An empty map turns it off. Only
-prompt-only calls go to LM (no tools, no native checkout, no message list). A
-hub that does not allow the task, or has no capacity, answers an error and AB
-continues with its normal providers. The hub owns the tenant and task allowlist
+prompt-only calls go to LM (no tools, no native checkout, no message list). By
+default (`lm_pool_only`, true) these tasks never fall back to cloud: a busy or
+unreachable pool is retried every minute for `lm_pool_wait_s` (default 3600)
+and then the call fails (`LmPoolUnavailable`); a hub that does not allow the
+task fails at once. A fix runs on the pool on every attempt, retries included.
+With `lm_pool_only` false, a miss continues with the normal providers. The hub owns the tenant and task allowlist
 (`llm_ab_work`, see `docs/llm.md` in lm).
 
 The review ladder seats two LM passes ahead of the cloud filter: `review`
