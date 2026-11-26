@@ -38,6 +38,15 @@ def test_long_admin_jobs_are_not_reported_as_slow():
 
 
 
+def test_llm_worker_commands_are_slow_by_design_but_other_commands_still_report():
+    cmds = [{"key": key, "spoke": "llm-1", "count": 9, "slow": 9, "avg_s": 300.0, "max_s": 600.0}
+            for key in ("LLM_COMPLETE", "LLM_PREPARE")]
+    assert hc.evaluate(_report(perf={"slow_route_s": 3, "slow_command_s": 5, "routes": [], "commands": cmds}), []) == []
+    cmds.append({"key": "NETBOX_GET_DEVICES", "spoke": "nb-1", "count": 9, "slow": 9, "avg_s": 9.0, "max_s": 9.0})
+    rep = _report(perf={"slow_route_s": 3, "slow_command_s": 5, "routes": [], "commands": cmds})
+    assert [f["kind"] for f in hc.evaluate(rep, [])] == ["slow_command"]
+
+
 def test_a_slow_user_page_next_to_the_admin_api_is_still_reported():
     rep = _report(perf={"slow_route_s": 3, "slow_command_s": 5, "commands": [],
                         "routes": [{"key": "GET /api/admin/ops-summary", "count": 4,

@@ -15,6 +15,7 @@ import json
 import re
 import sys
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 
 def ask(args, case):
@@ -45,26 +46,29 @@ def main():
     ap.add_argument("--token", required=True)
     ap.add_argument("--url", default="https://127.0.0.1")
     ap.add_argument("--timeout", type=float, default=960)
+    ap.add_argument("--concurrency", type=int, default=1, help="cases in flight at once")
     args = ap.parse_args()
-    total = agree = scored = 0
-    for line in open(args.cases):
-        if not line.strip():
-            continue
-        case = json.loads(line)
-        total += 1
+    cases = [json.loads(line) for line in open(args.cases) if line.strip()]
+    total, agree, scored = len(cases), 0, 0
+
+    def run(case):
+        """Replay one case; return its result row."""
         try:
             out = ask(args, case)
         except Exception as exc:  # noqa: BLE001 - report and keep replaying
-            print(json.dumps({"id": case.get("id"), "error": str(exc)}))
-            continue
-        got = verdict_of(out.get("text"))
-        row = {"id": case.get("id"), "status": out.get("status"), "verdict": got,
-               "expected": case.get("expected_verdict")}
-        if case.get("expected_verdict") and got:
-            scored += 1
-            agree += got.lower() == case["expected_verdict"].lower()
-        print(json.dumps(row))
-    print(json.dumps({"summary": {"cases": total, "scored": scored, "agreed": agree}}))
+            return {"id": case.get("id"), "error": str(exc)}
+        return {"id": case.get("id"), "status": out.get("status"), "verdict": verdict_of(out.get("text")),
+                "expected": case.get("expected_verdict"), "model": out.get("model"),
+                "elapsed_s": out.get("elapsed_s")}
+
+    # Several cases in flight at once spread across the pool's workers.
+    with ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as pool:
+        for row in pool.map(run, cases):
+            if row.get("expected") and row.get("verdict"):
+                scored += 1
+                agree += row["verdict"].lower() == row["expected"].lower()
+            print(json.dumps(row), flush=True)
+    print(json.dumps({"summary": {"cases": total, "scored": scored, "agreed": agree}}), flush=True)
     return 0
 
 

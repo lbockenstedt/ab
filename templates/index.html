@@ -1449,13 +1449,14 @@
                                     <option value="ollama2">Ollama 2 (remote)</option>
                                     <option value="ollama_cloud">Ollama Cloud (ollama.com — needs key)</option>
                                     <option value="lmstudio">LM Studio (local)</option>
+                                    <option value="lm_pool">LM worker pool (local)</option>
                                     <option value="claude_cli">Claude CLI (local)</option>
                                     <option value="copilot">GitHub Copilot</option>
                                 </select>
                             </div>
                             <p id="vault-creds-empty" class="text-sm text-slate-500 italic hidden">No providers configured yet — pick one above to add its API credentials.</p>
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-3" id="vault-creds-list">
-                                {% for pname in ['google','anthropic','openai','groq','openrouter','ollama','ollama2','ollama_cloud','lmstudio','claude_cli','copilot'] %}
+                                {% for pname in ['google','anthropic','openai','groq','openrouter','ollama','ollama2','ollama_cloud','lmstudio','lm_pool','claude_cli','copilot'] %}
                                 {% set cred = settings.llm_credentials.get(pname, {}) if settings.llm_credentials else {} %}
                                 {% set _is_active = cred.get('has_key') or cred.get('base_url') or (pname in _entry_providers) %}
                                 <div id="cred-card-{{ pname }}" data-provider="{{ pname }}" class="p-3 bg-slate-50 rounded-lg border border-slate-200 {% if not _is_active %}hidden{% endif %}">
@@ -1489,6 +1490,8 @@
                                             </div>
                                         </div>
                                     </div>
+                                    {% elif pname == 'lm_pool' %}
+                                    <p class="text-xs text-slate-500">Uses the <strong>LM worker pool</strong> through the hub — no key or URL. Pick a pool task (scout, review, coding, ...) as the model; the hub's AppBuilder work rule must allow it.</p>
                                     {% elif pname == 'claude_cli' %}
                                     <div class="space-y-2">
                                         <p class="text-xs text-slate-500">Uses the <strong>Claude Code</strong> session authenticated on this server — no API key needed. The <code class="bg-slate-100 px-1 rounded">claude</code> binary must be in PATH.</p>
@@ -1554,6 +1557,7 @@
                                         <option value="ollama2">Ollama 2 (remote)</option>
                                         <option value="ollama_cloud">Ollama Cloud (ollama.com — needs key)</option>
                                         <option value="lmstudio">LM Studio (local)</option>
+                                    <option value="lm_pool">LM worker pool (local)</option>
                                         <option value="claude_cli">Claude CLI (local)</option>
                                         <option value="copilot">GitHub Copilot</option>
                                     </select>
@@ -1607,6 +1611,7 @@
                                                 <option value="ollama2" {{ 'selected' if entry.provider == 'ollama2' else '' }}>Ollama 2 (remote)</option>
                                                 <option value="ollama_cloud" {{ 'selected' if entry.provider == 'ollama_cloud' else '' }}>Ollama Cloud (ollama.com — needs key)</option>
                                                 <option value="lmstudio" {{ 'selected' if entry.provider == 'lmstudio' else '' }}>LM Studio (local)</option>
+                                                <option value="lm_pool" {{ 'selected' if entry.provider == 'lm_pool' else '' }}>LM worker pool (local)</option>
                                                 <option value="claude_cli" {{ 'selected' if entry.provider == 'claude_cli' else '' }}>Claude CLI (local)</option>
                                                 <option value="copilot" {{ 'selected' if entry.provider == 'copilot' else '' }}>GitHub Copilot</option>
                                             </select>
@@ -1737,6 +1742,7 @@
                             <option value="google"></option>
                             <option value="groq"></option>
                             <option value="lmstudio"></option>
+                            <option value="lm_pool"></option>
                             <option value="ollama"></option>
                             <option value="ollama2"></option>
                             <option value="ollama_cloud"></option>
@@ -5861,12 +5867,13 @@
             ['gemma2-9b',              30],
             ['qwen-qwq',               30],
         ];
-        const _PROVIDER_RPM = {google: 10, anthropic: 50, openai: 60, ollama: 10, ollama2: 10, ollama_cloud: 30, groq: 30, openrouter: 20, lmstudio: 0, claude_cli: 10};
+        const _PROVIDER_RPM = {google: 10, anthropic: 50, openai: 60, ollama: 10, ollama2: 10, ollama_cloud: 30, groq: 30, openrouter: 20, lmstudio: 0, lm_pool: 0, claude_cli: 10};
 
         // Ollama slots are no-key EXCEPT the hosted cloud one — mirrors
         // llm_client._provider_is_nokey so the UI and the failover gate agree on
         // which slots are usable without a credential.
         const _isNokeyProvider = (p) => (p || '').startsWith('lmstudio')
+            || p === 'lm_pool'
             || p === 'claude_cli'
             || ((p || '').startsWith('ollama') && p !== 'ollama_cloud');
 
@@ -6161,7 +6168,7 @@
         // innerHTML -- provider/match/label/notes are operator free text and
         // AppBuilder has no escapeHtml helper (same rule as the SSO chips).
         const AB_REG_PROVIDERS = ['anthropic', 'claude_cli', 'copilot', 'google', 'groq',
-                                  'lmstudio', 'ollama', 'ollama2', 'ollama_cloud',
+                                  'lm_pool', 'lmstudio', 'ollama', 'ollama2', 'ollama_cloud',
                                   'openai', 'openrouter'];
         const AB_REG_COST = [
             ['free', 'free — self-hosted / no billing'],
