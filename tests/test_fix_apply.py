@@ -37,7 +37,7 @@ def _load_funcs():
             "_json_string_spans", "_looks_truncated_json", "_close_truncated_json",
             "_fetch_repo_file_for_review", "_repo_file_text",
             "_snippet_language_mismatch_hint", "_syntax_regressed",
-            "_relaxed_edit_span"}
+            "_relaxed_edit_span", "_strip_repo_prefix"}
     want_assign = {"_ISSUE_STOP_TOKENS", "_inflight_lock", "_inflight_issues",
                     "_JSON_BAD_ESCAPE_RE", "_JS_ONLY_TOKENS_RE", "_PY_ONLY_TOKENS_RE",
                     "_JS_EXTS", "_PY_EXTS", "_EDIT_OBJECT_KEYS",
@@ -321,6 +321,25 @@ def test_an_edit_stub_for_a_file_written_by_fixes_is_not_an_error():
 
     apply(json.dumps({"confidence": 0.9, "edits": [stub]}), d)
     assert [e for e in errors if "malformed edit" in e]
+
+
+def test_edit_path_with_repo_name_prefix_is_resolved(tmp_path):
+    """Local models write "lm/core/src/x.py" for "core/src/x.py"; only leading
+    directories are dropped, and a path that matches nothing is still skipped."""
+    ns = _load_funcs()
+    apply, errors = ns["parse_and_apply"], ns["_captured_errors"]
+    (tmp_path / "core/src").mkdir(parents=True)
+    (tmp_path / "core/src/x.py").write_text("a = 1\n")
+    edit = {"search": "a = 1", "replace": "a = 2"}
+    ok, applied, _ = apply(json.dumps({"confidence": 0.9, "edits": [
+        dict(edit, file="lm/core/src/x.py")]}), str(tmp_path))
+    assert ok and list(applied) == ["core/src/x.py"]
+    assert (tmp_path / "core/src/x.py").read_text() == "a = 2\n"
+    errors.clear()
+    ok, _, _ = apply(json.dumps({"confidence": 0.9, "edits": [
+        dict(edit, file="lm/other/x.py")]}), str(tmp_path))
+    assert not ok and [e for e in errors if "does not exist" in e]
+    assert ns["_strip_repo_prefix"](str(tmp_path), "../core/src/x.py") is None
 
 
 def test_unsafe_repo_targets_remain_rejected(tmp_path):
