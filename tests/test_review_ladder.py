@@ -21,7 +21,7 @@ import pytest
 # Names of the helpers we extract from fix_engine.py.
 _FIX_NAMES = {
     "_model_allowed",
-    "_review_policy",
+    "_review_policy", "_csv_models",
     "_resolve_builder",
     "_review_ladder",
     "_lm_review_filters",
@@ -52,7 +52,7 @@ def _load(enumerate_fn, policy_data):
                 getattr(t, "id", None) in _FIX_ASSIGNS for t in node.targets):
             segs.append(ast.get_source_segment(src, node))
     llm = types.SimpleNamespace(_enumerate_candidates=enumerate_fn)
-    ns = {"json": json, "os": os, "fnmatch": __import__("fnmatch"),
+    ns = {"json": json, "os": os, "re": __import__("re"), "fnmatch": __import__("fnmatch"),
           "logger": _NoLog(), "llm_client": llm,
           "__file__": os.path.abspath("fix_engine.py")}
     exec("\n\n".join(segs), ns)
@@ -348,3 +348,15 @@ def test_apply_ai_fix_tries_lm_before_the_cloud_when_local_first():
     assert "local_first=False" in body
     assert body.index("if local_first:") < body.index("_reply = call_llm(")
     assert 'llm_client.lm_complete("fix"' in body
+
+
+def test_settings_override_the_policy_frontier_and_bar(ns):
+    """Settings values replace the policy file's; blanks keep it; the bar never drops below 0.90."""
+    cfg = {"REVIEW_FRONTIER_FOR_CLAUDE": " gpt-6-sol ", "REVIEW_LADDER_MODELS": "a, b a",
+           "REVIEW_PASS_CONFIDENCE": "0.95", "REVIEW_FRONTIER_FOR_OTHER": ""}
+    pol = ns["_review_policy"](cfg)
+    assert pol["frontier"] == {"anthropic_author": "gpt-6-sol", "other_author": "claude-opus-5.5"}
+    assert pol["ladder"] == ["a", "b"] and pol["pass_confidence"] == "0.95"
+    assert ns["_review_policy"]({})["frontier"]["anthropic_author"] == "gpt-5.6-sol"
+    ladder = ns["_review_ladder"]({"REVIEW_PASS_CONFIDENCE": "0.5"})
+    assert ladder["pass_confidence"] == 0.9

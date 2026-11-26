@@ -1731,6 +1731,24 @@
                             <input type="checkbox" name="REVIEW_MODEL_LADDER" id="REVIEW_MODEL_LADDER" {{ 'checked' if settings.REVIEW_MODEL_LADDER else '' }} title="Review panels run the cheap filter model first (.github/model-policy.json review.ladder); a filter Reject ends the panel. Then one frontier reviewer from another vendor gives the final verdict, which passes only at 0.90 or more. Off: the multi-reviewer allowlist panel." class="w-4 h-4 text-primary-text focus:ring-brand">
                             <label for="REVIEW_MODEL_LADDER" class="text-xs font-medium text-slate-700">Review model ladder (cheap filter, then one frontier reviewer at 0.90+)</label>
                         </div>
+                        <!-- Model policy overrides (fix_engine._review_policy / _ladder_models); blank = .github/model-policy.json -->
+                        <div class="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2">
+                            <label class="text-xs text-slate-700 flex flex-col gap-1">Review filter models (local or cheap, first to review)
+                                <input type="text" name="REVIEW_LADDER_MODELS" value="{{ settings.REVIEW_LADDER_MODELS or '' }}" placeholder="policy default" title="Comma separated model ids, tried in order before the frontier reviewer. Blank uses the fleet policy." class="border border-slate-300 rounded px-2 py-1 text-xs font-mono">
+                            </label>
+                            <label class="text-xs text-slate-700 flex flex-col gap-1">Frontier reviewer when a Claude model wrote the change
+                                <input type="text" name="REVIEW_FRONTIER_FOR_CLAUDE" value="{{ settings.REVIEW_FRONTIER_FOR_CLAUDE or '' }}" placeholder="policy default" title="Model id of the final reviewer for Claude-written changes (a different vendor). Blank uses the fleet policy." class="border border-slate-300 rounded px-2 py-1 text-xs font-mono">
+                            </label>
+                            <label class="text-xs text-slate-700 flex flex-col gap-1">Frontier reviewer when another vendor wrote the change
+                                <input type="text" name="REVIEW_FRONTIER_FOR_OTHER" value="{{ settings.REVIEW_FRONTIER_FOR_OTHER or '' }}" placeholder="policy default" title="Model id of the final reviewer for changes not written by Claude. Blank uses the fleet policy." class="border border-slate-300 rounded px-2 py-1 text-xs font-mono">
+                            </label>
+                            <label class="text-xs text-slate-700 flex flex-col gap-1">Frontier approval bar (0.90 to 1.00)
+                                <input type="text" name="REVIEW_PASS_CONFIDENCE" value="{{ settings.REVIEW_PASS_CONFIDENCE or '' }}" placeholder="0.90" title="The frontier reviewer must Approve at this confidence or more. Never below 0.90. Blank uses the fleet policy." class="border border-slate-300 rounded px-2 py-1 text-xs font-mono">
+                            </label>
+                            <label class="text-xs text-slate-700 flex flex-col gap-1">Fix model ladder (cheapest first)
+                                <input type="text" name="FIX_LADDER_MODELS" value="{{ settings.FIX_LADDER_MODELS or '' }}" placeholder="policy default" title="Comma separated model ids; a fix climbs one rung per failed attempt. Blank uses the fleet policy. Premium escalation is set separately." class="border border-slate-300 rounded px-2 py-1 text-xs font-mono">
+                            </label>
+                        </div>
                         <!-- Fix result recording (fix_outcomes.enabled) -->
                         <div class="flex items-center gap-2 mt-2">
                             <input type="checkbox" name="FIX_OUTCOMES_ENABLED" id="FIX_OUTCOMES_ENABLED" {{ 'checked' if settings.FIX_OUTCOMES_ENABLED else '' }} title="Record each PR fix attempt (model, pass or fail, reason, cost) for the table below. Off: nothing is recorded and the table stays empty." class="w-4 h-4 text-primary-text focus:ring-brand">
