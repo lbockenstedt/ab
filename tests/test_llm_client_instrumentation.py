@@ -55,6 +55,7 @@ def _load_dispatch_ns():
         "_is_copilot": lambda p: p == "copilot",
         "_is_ollama": lambda p: p.startswith("ollama"),
         "_is_lmstudio": lambda p: p == "lmstudio",
+        "_is_lm_pool": lambda p: p == "lm_pool",
         "_normalize_lmstudio_url": lambda u: u,
         "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1", "OPENROUTER_HEADERS": {},
     }
@@ -124,6 +125,7 @@ def _load_timed_ns(perf_path):
         # branches log on expiry.
         "_TIMEOUT_AVAILABLE": False,
         "timeout": None,
+        "_is_lm_pool": lambda p: p == "lm_pool", "LM_COMPLETE_TIMEOUT_S": 7245,
         "logger": _StubLogger(),
         # The daily spend gate stays open and counts nothing here; tests/test_ai_spend.py covers it.
         "ai_spend": type("OpenSpendGate", (), {

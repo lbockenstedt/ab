@@ -322,6 +322,18 @@ def _copilot_api_token(gh_token):
     return token
 
 
+#: Pool tasks an entry may use as its model (the hub's AppBuilder work rule must allow each).
+LM_POOL_TASKS = ("scout", "summary", "pr_summary", "coding", "review", "review_deep")
+
+
+def _is_lm_pool(provider):
+    """True for the LM worker-pool provider (``lm_pool``).
+
+    The pool is reached through the hub (LLM_COMPLETE), not an HTTP endpoint; an
+    entry's model is the pool task name (scout, review, coding, ...)."""
+    return (provider or "").lower().strip() == "lm_pool"
+
+
 def _provider_is_nokey(provider):
     """True when ``provider`` authenticates without an API key: claude_cli (session
     auth), LM Studio and self-hosted Ollama (local/LAN servers). Ollama Cloud is
@@ -330,6 +342,7 @@ def _provider_is_nokey(provider):
     every call to 401."""
     # claude_cli, LM Studio and self-hosted Ollama need no key.
     return (provider == "claude_cli"
+            or _is_lm_pool(provider)
             or _is_lmstudio(provider)
             or (_is_ollama(provider) and not _is_ollama_cloud(provider)))
 
@@ -2667,6 +2680,8 @@ def _call_provider(provider, model, api_key, base_url, messages, tools, effectiv
         return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config,
                                provider_name="openrouter", extra_headers=OPENROUTER_HEADERS, usage_out=usage_out,
                                json_schema=json_schema)
+    if _is_lm_pool(p):
+        return _request_lm_pool(model, messages)
     if _is_lmstudio(p):
         # LM Studio exposes an OpenAI-compatible API; no auth key required.
         effective_url = _normalize_lmstudio_url(base_url)
@@ -2910,6 +2925,9 @@ def _call_provider_timed(provider, model, api_key, base_url, messages, tools, ef
 
     # Extract timeout from config, defaulting to 900 seconds if not present
     timeout_s = int(config.get("LLM_TIMEOUT", 900))
+    if _is_lm_pool(provider):
+        # CPU workers queue and infer for far longer than a cloud call.
+        timeout_s = max(timeout_s, LM_COMPLETE_TIMEOUT_S)
 
     # Fleet rule 1.10: no paid call once today's AI spend gate is closed. This
     # also stops a candidate chain or tool loop that began while it was open.
@@ -3557,6 +3575,33 @@ DEFAULT_LM_TASKS = {
 }
 
 
+def _lm_hub_request(task, prompt):
+    """Send one LLM_COMPLETE job to the hub; return its reply dict, or None with no hub client."""
+    from workers import _get_hub_agent_client
+    client = _get_hub_agent_client()
+    if not client:
+        return None
+    return client.request_sync("LLM_COMPLETE", {"task": task, "prompt": prompt},
+                               timeout=LM_COMPLETE_TIMEOUT_S)
+
+
+def _request_lm_pool(model, messages):
+    """Run a chat as one prompt-only job on the LM worker pool; ``model`` is the pool task.
+
+    Unlike lm_complete, a miss raises, so the picker fails over to the next entry.
+    """
+    # Flatten the chat into one prompt: the pool takes text, not messages.
+    prompt = "\n\n".join(str(m.get("content") or "") for m in (messages or []) if isinstance(m, dict))
+    reply = _lm_hub_request(model, prompt)
+    if not isinstance(reply, dict) or reply.get("status") != "SUCCESS":
+        code = reply.get("code") or reply.get("error") if isinstance(reply, dict) else "no hub connection"
+        raise Exception(f"LM pool {model} unavailable: {code}")
+    text = reply.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise Exception(f"LM pool {model} returned no text")
+    return text
+
+
 def lm_complete(lm_task, prompt, system_prompt, config):
     """Try one prompt-only job on the LM-hosted local models; None means use the normal chain.
 
@@ -3570,12 +3615,7 @@ def lm_complete(lm_task, prompt, system_prompt, config):
     if not isinstance(target, str) or not target:
         return None
     try:
-        from workers import _get_hub_agent_client
-        client = _get_hub_agent_client()
-        reply = client.request_sync("LLM_COMPLETE", {
-            "task": target,
-            "prompt": ("%s\n\n%s" % (system_prompt, prompt)) if system_prompt else prompt,
-        }, timeout=LM_COMPLETE_TIMEOUT_S) if client else None
+        reply = _lm_hub_request(target, ("%s\n\n%s" % (system_prompt, prompt)) if system_prompt else prompt)
     except Exception as e:  # noqa: BLE001
         logger.info("LM %s unavailable: %s", target, e)
         return None
