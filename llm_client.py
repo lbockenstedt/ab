@@ -3602,11 +3602,40 @@ def _request_lm_pool(model, messages):
     return text
 
 
+class LmPoolUnavailable(Exception):
+    """The LM pool could not run a pool-only task; AB must not fall back to cloud."""
+
+
+def lm_pool_only(config):
+    """True (the default) when LM-routed tasks must run on the pool and never fall to cloud."""
+    return (config or {}).get("lm_pool_only", True) is not False
+
+
+def _lm_try(target, prompt):
+    """One hub attempt: (text, code); text is None on any miss."""
+    try:
+        reply = _lm_hub_request(target, prompt)
+    except Exception as e:  # noqa: BLE001
+        logger.info("LM %s unavailable: %s", target, e)
+        return None, "error"
+    if isinstance(reply, dict) and reply.get("status") == "SUCCESS":
+        text = reply.get("text")
+        if isinstance(text, str) and text.strip():
+            return text, None
+        return None, "empty"
+    return None, (reply.get("code") or "error") if isinstance(reply, dict) else "no_hub"
+
+
 def lm_complete(lm_task, prompt, system_prompt, config):
-    """Try one prompt-only job on the LM-hosted local models; None means use the normal chain.
+    """Run one prompt-only job on the LM-hosted local models.
 
     The AB task maps through config["lm_llm_tasks"] ({ab_task: lm_task}); the hub
     decides the tenant and the allowed tasks from the AppBuilder client certificate.
+    With lm_pool_only (default) a busy or unreachable pool is retried until
+    config["lm_pool_wait_s"] (default 3600) passes, then LmPoolUnavailable is raised
+    so the caller never silently spends cloud tokens. A misconfigured hub
+    (not_configured) raises at once, since waiting cannot fix it. With
+    lm_pool_only off, any miss returns None and the normal chain runs.
     """
     mapping = (config or {}).get("lm_llm_tasks")
     if not isinstance(mapping, dict):
@@ -3614,13 +3643,18 @@ def lm_complete(lm_task, prompt, system_prompt, config):
     target = mapping.get(lm_task)
     if not isinstance(target, str) or not target:
         return None
-    try:
-        reply = _lm_hub_request(target, ("%s\n\n%s" % (system_prompt, prompt)) if system_prompt else prompt)
-    except Exception as e:  # noqa: BLE001
-        logger.info("LM %s unavailable: %s", target, e)
-        return None
-    text = reply.get("text") if isinstance(reply, dict) and reply.get("status") == "SUCCESS" else None
-    return text if isinstance(text, str) and text.strip() else None
+    full = ("%s\n\n%s" % (system_prompt, prompt)) if system_prompt else prompt
+    only = lm_pool_only(config)
+    deadline = time.monotonic() + float((config or {}).get("lm_pool_wait_s", 3600))
+    while True:
+        text, code = _lm_try(target, full)
+        if text is not None:
+            return text
+        if not only:
+            return None
+        if code == "not_configured" or time.monotonic() >= deadline:
+            raise LmPoolUnavailable("LM pool %s unavailable: %s" % (target, code))
+        time.sleep(60)
 
 
 def call_llm(prompt, system_prompt="You are a helpful AI assistant.", task_id=None, messages=None, tools=None, stream=None,

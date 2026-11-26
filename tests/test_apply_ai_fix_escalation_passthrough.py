@@ -84,6 +84,10 @@ class _LlmClientStub:
     def lm_complete(*a, **k):
         return None
 
+    @staticmethod
+    def lm_pool_only(config):
+        return False
+
 
 def main():
     ok = True
