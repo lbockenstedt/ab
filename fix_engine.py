@@ -4890,6 +4890,9 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_
         from model_selection import LlmRequirements
         if requirements is None:
             requirements = LlmRequirements(complexity="large", needs_structured_output=True)
+        # A fresh fix (no earlier-attempt exclusions, no pin) goes to the LM pool
+        # first; the checkout path below bypasses call_llm's lm_task routing.
+        local_first = local_first or not (requirements.exclude_models or requirements.pin_key or requirements.restrict)
         requirements = dataclasses.replace(
             requirements, min_context_tokens=max(requirements.min_context_tokens, len(prompt) // 4))
         # Hold the model that WRITES the fix to the same bar as the panel that
