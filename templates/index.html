@@ -2937,6 +2937,9 @@
                                 <input type="text" id="{{ st.field }}" name="{{ st.field }}" value="{{ st.value }}" title="{{ st.help }}" placeholder="{{ st.default }}" class="w-full p-2 text-xs rounded-lg border border-slate-300 outline-none focus:ring-1 focus:ring-brand">
                                 <p class="text-xs text-slate-500">{{ st.help }} Default: <code>{{ st.default }}</code>.</p>
                                 <p class="text-xs text-slate-500">{{ st.suited }}</p>
+                                {% if st.overridden %}
+                                <p class="text-xs text-amber-700">This list was saved earlier and overrides the new default above. <button type="button" class="underline" onclick="document.getElementById('{{ st.field }}').value='{{ st.default }}'">Reset to default</button>, then Save.</p>
+                                {% endif %}
                                 <table class="w-full text-left text-xs rounded-lg border border-slate-200 overflow-hidden" title="The picker tries free local models first, then cheap, then frontier. A model is skipped when it is down or out of credit.">
                                     <thead class="bg-slate-50 text-slate-500"><tr><th class="px-3 py-1.5 font-medium">Tried</th><th class="px-3 py-1.5 font-medium">Model</th><th class="px-3 py-1.5 font-medium">Where</th><th class="px-3 py-1.5 font-medium">Cost tier</th></tr></thead>
                                     <tbody class="divide-y divide-slate-100">
