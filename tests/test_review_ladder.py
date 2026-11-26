@@ -346,5 +346,5 @@ def test_apply_ai_fix_tries_lm_before_the_cloud_when_local_first():
     body = src[src.index("def apply_ai_fix("):]
     body = body[:body.index("\ndef ", 10)]
     assert "local_first=False" in body
-    assert body.index("if local_first:") < body.index("return call_llm(")
+    assert body.index("if local_first:") < body.index("_reply = call_llm(")
     assert 'llm_client.lm_complete("fix"' in body
