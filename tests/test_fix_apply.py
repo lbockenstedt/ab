@@ -36,7 +36,7 @@ def _load_funcs():
             "_relax_json_fix_strings", "_repair_missing_object_keys",
             "_json_string_spans", "_looks_truncated_json", "_close_truncated_json",
             "_fetch_repo_file_for_review", "_repo_file_text",
-            "_snippet_language_mismatch_hint", "_syntax_regressed", "_closest_line_hint", "_set_duplicate_noop",
+            "_snippet_language_mismatch_hint", "_syntax_regressed", "_closest_line_hint", "_set_duplicate_noop", "_repo_grep_context", "_GREP_EXTS",
             "_relaxed_edit_span", "_strip_repo_prefix"}
     want_assign = {"_ISSUE_STOP_TOKENS", "_inflight_lock", "_inflight_issues",
                     "_JSON_BAD_ESCAPE_RE", "_JS_ONLY_TOKENS_RE", "_PY_ONLY_TOKENS_RE",

@@ -2431,6 +2431,10 @@
                                     <label for="fix_logdetected_enabled" class="text-xs font-medium text-slate-700" title="Attempt AUTO-FIXES for log-detected / automated-fix issues. Off by default so the fixer doesn't churn on log-scraped issues. Bug + Critical always fix.">Auto-fix log-detected issues <span class="text-slate-500">(Bug &amp; Critical always fix)</span></label>
                                 </div>
                                 <div class="flex items-center gap-3">
+                                    <input type="checkbox" name="perf_reject_to_ops" id="perf_reject_to_ops" {{ 'checked' if settings.get('perf_reject_to_ops', True) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
+                                    <label for="perf_reject_to_ops" class="text-xs font-medium text-slate-700" title="A health-check timeout or slowness finding whose code fix a reviewer rejected goes to ops (ops-alert) instead of more fix attempts.">Hand rejected timeout findings to ops</label>
+                                </div>
+                                <div class="flex items-center gap-3">
                                     <input type="checkbox" name="held_requeue_enabled" id="held_requeue_enabled" {{ 'checked' if settings.get('held_requeue_enabled', True) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                     <label for="held_requeue_enabled" class="text-xs font-medium text-slate-700" title="Issues held with 'no configured model meets this fix' (written during an LLM outage) go back to the bounded retry lane, 3 per scan, while an LLM endpoint is online.">Requeue issues held for want of a model</label>
                                 </div>

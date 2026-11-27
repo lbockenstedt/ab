@@ -4801,6 +4801,35 @@ _ISSUE_STOP_TOKENS = {
 }
 
 
+_GREP_EXTS = (".py", ".js", ".mjs", ".ts", ".sh", ".html")
+
+
+def _repo_grep_context(repo_path, identifiers, skip_paths=(), max_chars=6000, per_id=6):
+    """Where the issue's code-like identifiers (GET_AGENTS, _KEEPALIVE_CMDS, fooBar) appear in the
+    whole checkout, as "path:line: text" rows. The pool model sees only the files in the prompt,
+    so this shows it every definition and use, including that a name it wants to add already
+    exists. Code files only (config files may hold secrets); files already in the prompt and
+    plain English words are skipped. Returns "" when nothing is found or git grep fails."""
+    import subprocess
+    syms = [i for i in identifiers if "_" in i or i.isupper() or (re.search(r"[a-z]", i) and re.search(r"[A-Z]", i[1:]))][:6]
+    rows, used = [], 0
+    for sym in syms:
+        try:
+            out = subprocess.run(["git", "grep", "-n", "-I", "-w", "-F", "-e", sym, "--"]
+                                 + [f"*{e}" for e in _GREP_EXTS],
+                                 cwd=repo_path, capture_output=True, text=True, timeout=20).stdout
+        except Exception:  # noqa: BLE001 - the extra context is optional
+            return ""
+        hits = [ln for ln in out.splitlines() if ln.split(":", 1)[0] not in skip_paths][:per_id]
+        for ln in hits:
+            row = ln[:200]
+            if used + len(row) > max_chars:
+                return "\n".join(rows)
+            rows.append(row)
+            used += len(row) + 1
+    return "\n".join(rows)
+
+
 def _issue_identifiers(issue_body):
     """Pull candidate code identifiers from an issue body (prioritising the
     ``Error:`` line) so a large file can be windowed around the buggy region
@@ -4969,6 +4998,15 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_
                     break
             except Exception as e:
                 logger.error(f"Could not read file {f_path}: {e}")
+    # Show where the issue's symbols appear across the whole checkout (the model sees only the
+    # files above), so it can see a name already exists or where a caller lives.
+    grep_chars = int(config.get("fix_repo_grep_chars", 6000) or 0)
+    if grep_chars > 0 and repo_path and os.path.isdir(repo_path):
+        found = _repo_grep_context(repo_path, identifiers, skip_paths=set(relevant_files), max_chars=grep_chars)
+        if found:
+            context_code += ("\n--- WHERE THE ISSUE'S SYMBOLS APPEAR ELSEWHERE IN THE REPO (path:line: text; "
+                             "not editable context, check before adding a name that already exists) ---\n"
+                             + found + "\n")
     # Ask for TARGETED search/replace edits, not a full-file rewrite: a local model
     # cannot faithfully reproduce a large file, and a truncated rewrite would delete
     # real code (the truncated-rewrite guard then aborts the whole fix). An edit
@@ -6459,6 +6497,16 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             # Rejected: pass the critique to the next attempt.
                             if review_verdict == "Reject":
                                 logger.warning(f"Reviewer REJECTED fix for {issue_id}: {critique}")
+                                # A health-check timing/slowness finding that a reviewer rejected usually traces
+                                # to a slow host, not code; hand it to ops instead of burning more pool attempts.
+                                import log_scan
+                                if (config.get("perf_reject_to_ops", True)
+                                        and log_scan.is_performance_finding(getattr(issue, "title", ""))):
+                                    return _stop_no_code_change(
+                                        issue, issue_id,
+                                        "A reviewer rejected the code fix for this health-check finding, so the "
+                                        "cause is probably the host or network, not the code. Reviewer: "
+                                        + str(critique or "")[:400], repo_git)
                                 error_context = f"Reviewer rejected the fix: {critique}"
                                 # Record the files this rejected attempt modified so
                                 # the re-targeted retry excludes them (never re-lead
