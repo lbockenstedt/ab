@@ -305,7 +305,7 @@ beating the best score of panels approved, then lowest confidence) with at most
 
 ### Admin ops API (`admin_ops.py`)
 
-A read-only diagnostics API for an operator or automation on the AB VM, so no browser session is needed. Every route is a GET returning JSON and is guarded by two gates:
+A diagnostics API for an operator or automation on the AB VM, so no browser session is needed. Every route is a GET returning JSON and is guarded by two gates:
 
 1. **Loopback peer only.** The real TCP peer must be 127.0.0.1 / ::1. Anything else gets a bare `404` (the route is not revealed). `X-Forwarded-*` headers are ignored.
 2. **Token.** The `X-AB-Admin-Token` header must equal the root-minted token (`secrets.compare_digest`). A missing or wrong token gets `403`. The token is `AB_ADMIN_OPS_TOKEN` if set, else the 0600 file `/etc/ab/admin_ops_token` (`./admin_ops_token` when `/etc/ab` is not writable), minted at startup. The value is never logged.
@@ -319,6 +319,7 @@ The paths skip the session middleware (`_auth_exempt`); the in-route double gate
 | `/admin/ops/mission-control` | the same data as `GET /api/mission-control` |
 | `/admin/ops/log?lines=N&grep=TEXT&since=ISO` | tail of the AB log (last 4 MB read; `lines` default 200, max 2000; `grep` is a literal case-insensitive substring, never a regex; `since` filters on the leading timestamp) |
 | `/admin/ops/llm` | `llm_endpoints_online`, `any_llm_online`, `provider_N_online` |
+| `POST /admin/ops/retry` `{"issue_id": "owner/repo:123"}` | the only write route: starts the same manual retry as the dashboard's Retry button (400 on a malformed id; an already-running retry is refused as on the dashboard) |
 
 ```
 curl -sk -H "X-AB-Admin-Token: $(sudo cat /etc/ab/admin_ops_token)" "https://127.0.0.1/admin/ops/state"
