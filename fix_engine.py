@@ -5306,6 +5306,7 @@ def parse_and_apply(content, repo_path, *, feedback_out=None):
     import re as _re, ast as _ast
     feedback = {} if feedback_out is None else feedback_out
     feedback["last_failures"] = []   # reset per call; read by the retry loop
+    feedback["noop_edits"] = []      # edits skipped because they change nothing; read by the retry loop
     # Coarse reason for the LAST return, read by the retry loop so it can give
     # the model accurate feedback. "invalid_json" is NOT a catch-all: a valid
     # JSON object whose edit anchors simply didn't match the file is a
@@ -5540,8 +5541,7 @@ def parse_and_apply(content, repo_path, *, feedback_out=None):
                     if _span:
                         if filepath.endswith(".py") and _set_duplicate_noop(
                                 current, current[:_span[0]] + str(replace) + current[_span[1]:]):
-                            _miss.append(f"{filepath}: this edit only repeats items a set already holds, "
-                                         "so it would change nothing — find the real cause instead")
+                            feedback["noop_edits"].append(filepath)
                             continue
                         logger.info(f"Edit matched {filepath!r} only after whitespace "
                                     f"normalisation — applying (unique match).")
@@ -5571,8 +5571,7 @@ def parse_and_apply(content, repo_path, *, feedback_out=None):
                 # An edit that only repeats an item a set literal already holds changes nothing.
                 if filepath.endswith(".py") and _set_duplicate_noop(
                         current, current.replace(search, str(replace))):
-                    _miss.append(f"{filepath}: this edit only repeats items a set already holds, so it "
-                                 "would change nothing — find the real cause instead")
+                    feedback["noop_edits"].append(filepath)
                     logger.warning(f"Edit to {filepath!r} only repeats existing set items; skipping")
                     continue
                 # Several matches: replace them all, with a warning.
@@ -5681,7 +5680,8 @@ def parse_and_apply(content, repo_path, *, feedback_out=None):
             # anchor missed the file (requote the exact text) vs no edits/fixes
             # at all (return a non-empty edits array).
             feedback["last_reason"] = (
-                "edit_anchor_miss" if feedback["last_failures"] else "no_edits")
+                "edit_anchor_miss" if feedback["last_failures"]
+                else "noop_edit" if feedback["noop_edits"] else "no_edits")
             return False, {}, 0.0
         # Success: clear the failure reason.
         feedback["last_reason"] = None
@@ -6332,6 +6332,13 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                 "correct indentation) into each \"search\", or use a larger unique "
                                 "anchor. Anchors that did not match: " + _detail)
                             _kind = "edit_anchor_miss"
+                        elif _reason == "noop_edit":
+                            failure_msg = (
+                                "Your edit only repeats items a set already holds in " +
+                                ", ".join(parse_feedback.get("noop_edits") or []) +
+                                ", so it changes nothing. The anchor matched; the cause is elsewhere. "
+                                "Find the real cause or say no code change is needed.")
+                            _kind = "no_edits"
                         elif _reason == "no_edits":
                             failure_msg = (
                                 "The JSON parsed but contained no applicable changes. Return a JSON "
