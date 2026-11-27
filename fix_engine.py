@@ -4804,6 +4804,14 @@ _ISSUE_STOP_TOKENS = {
 _GREP_EXTS = (".py", ".js", ".mjs", ".ts", ".sh", ".html")
 
 
+def _mask_line_values(line):
+    """Mask what a source line may hold as a secret: URL userinfo, quoted or backtick string values
+    and 20+ character tokens. The code shape stays; the values never reach a prompt or a log."""
+    line = re.sub(r"(://)[^/\s@]+@", r"\1...@", line)
+    line = re.sub(r"""(["'`])(?:\\.|(?!\1).)*\1""", r"\1...\1", line)
+    return re.sub(r"\b[A-Za-z0-9+/_=-]{20,}\b", "...", line)
+
+
 def _repo_grep_context(repo_path, identifiers, skip_paths=(), max_chars=6000, per_id=6):
     """Where the issue's code-like identifiers (GET_AGENTS, _KEEPALIVE_CMDS, fooBar) appear in the
     whole checkout, as "path:line: text" rows. The pool model sees only the files in the prompt,
@@ -4825,7 +4833,7 @@ def _repo_grep_context(repo_path, identifiers, skip_paths=(), max_chars=6000, pe
             # Cross-file lines can hold literal secrets; drop any naming a credential.
             if re.search(r"(?i)token|secret|passw|api_?key|credential|bearer|signing|private[_ ]?key", ln):
                 continue
-            row = ln[:200]
+            row = _mask_line_values(ln)[:200]
             if used + len(row) > max_chars:
                 return "\n".join(rows)
             rows.append(row)
@@ -5265,8 +5273,7 @@ def _closest_line_hint(current, search, filepath):
         return ""
     # Quoted values and long tokens are masked: the line number and code shape locate the anchor,
     # and a secret in the file never reaches a log or an issue.
-    shape = re.sub(r"""(["'])(?:\\.|(?!\1).)*\1""", r"\1...\1", close[0])
-    shape = re.sub(r"\b[A-Za-z0-9+/_=-]{20,}\b", "...", shape)
+    shape = _mask_line_values(close[0])
     return f" — closest line in the file is {stripped.index(close[0]) + 1}: {shape[:120]!r} (string values masked)"
 
 
@@ -6509,11 +6516,11 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                 # A health-check timing/slowness finding that a reviewer rejected usually traces
                                 # to a slow host, not code; hand it to ops instead of burning more pool attempts.
                                 import log_scan
-                                if (config.get("perf_reject_to_ops", True)
+                                if (config.get("perf_reject_to_ops", True) and attempt > 1
                                         and log_scan.is_performance_finding(getattr(issue, "title", ""))):
                                     return _stop_no_code_change(
                                         issue, issue_id,
-                                        "A reviewer rejected the code fix for this health-check finding, so the "
+                                        "A reviewer rejected the code fixes for this health-check finding, so the "
                                         "cause is probably the host or network, not the code. Reviewer: "
                                         + str(critique or "")[:400], repo_git)
                                 error_context = f"Reviewer rejected the fix: {critique}"
