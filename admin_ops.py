@@ -247,3 +247,25 @@ async def ops_llm(request: Request):
     for n in range(1, 5):
         out["provider_%d_online" % n] = bool(state.get("provider_%d_online" % n))
     return out
+
+
+@router.post("/admin/ops/retry")
+async def ops_retry(request: Request):
+    """Start the manual retry of one issue (``{"issue_id": "owner/repo:123"}``), like the
+    dashboard's Retry button but without a session. Same two gates as every admin route."""
+    _guard(request)
+    try:
+        data = await request.json()
+    except ValueError:
+        data = {}
+    issue_id = data.get("issue_id") if isinstance(data, dict) else None
+    # Same shape check as /retry_issue: "owner/repo:number".
+    if not isinstance(issue_id, str) or not re.fullmatch(r"[\w.-]+/[\w.-]+:\d+", issue_id):
+        raise HTTPException(status_code=400, detail="issue_id must look like owner/repo:123")
+    # Lazy import: routes imports main, which includes this router.
+    import routes
+    result = await asyncio.to_thread(routes._retry_issue_when_idle, issue_id)
+    # An active-retry refusal comes back as a JSONResponse; pass its status and body through.
+    if hasattr(result, "status_code") and hasattr(result, "body"):
+        raise HTTPException(status_code=result.status_code, detail=result.body.decode()[:300])
+    return result
