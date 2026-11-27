@@ -94,3 +94,55 @@ def test_sweep_skips_pull_requests(monkeypatch):
     monkeypatch.setattr(workers, "update_processed", lambda fn: fn({}))
     assert workers.close_ghost_issues(_Repo([pr]), True) == []
     assert pr.state == "open"
+
+
+def test_requeue_stale_holds_caps_and_needs_llm(monkeypatch):
+    """Held-for-no-model records become failed (retry lane), at most `limit` per call, only with an LLM online."""
+    store = {f"o/r:{i}": {"status": "awaiting_human", "reason": workers.HELD_NO_MODEL_REASON,
+                          "timestamp": "2026-11-26T02:48:00"} for i in range(5)}
+    store["o/r:9"] = {"status": "awaiting_human", "reason": "other", "timestamp": "2026-11-26T02:48:00"}
+    monkeypatch.setattr(workers, "update_processed", lambda fn: fn(store))
+    cycle = {}
+    assert workers.requeue_stale_holds(cycle, False, {}) == []
+    assert workers.requeue_stale_holds(cycle, True, {"held_requeue_enabled": False}) == []
+    assert workers.requeue_stale_holds(cycle, True, {"failed_retry_max": 0}) == []
+    store["o/r:0"]["needs_human_at"] = "2026-11-25T00:00:00"
+    assert "o/r:0" not in workers.requeue_stale_holds(cycle, True, {})
+    store["o/r:0"].pop("needs_human_at")
+    for i in (1, 2, 3):
+        store[f"o/r:{i}"]["status"] = "awaiting_human"
+    done = workers.requeue_stale_holds(cycle, True, {})
+    assert len(done) == 3 and all(store[i]["status"] == "failed" for i in done)
+    assert store["o/r:9"]["status"] == "awaiting_human"
+    rec = store[done[0]]
+    assert rec["last_recurrence_at"] > rec["timestamp"]
+    assert workers.failed_retry_decision(rec, {}, now=__import__("datetime").datetime(2026, 11, 28)) == "retry"
+
+
+def test_clear_needs_human_label_removes_label():
+    """The requeue drops ab-needs-human from the issue; a missing issue is swallowed."""
+    calls = []
+
+    class Issue:
+        """Records label removals."""
+        def remove_from_labels(self, name):
+            """Record the removed label."""
+            calls.append(name)
+
+    class Repo:
+        """Returns the fake issue."""
+        def get_issue(self, n):
+            """Return the issue for number n."""
+            calls.append(n)
+            return Issue()
+
+    class Gh:
+        """Returns the fake repo."""
+        def get_repo(self, name):
+            """Return the repo named name."""
+            calls.append(name)
+            return Repo()
+
+    workers._clear_needs_human_label(Gh(), "o/r:7")
+    assert calls == ["o/r", 7, "ab-needs-human"]
+    workers._clear_needs_human_label(object(), "bad")
