@@ -4936,7 +4936,7 @@ def _publication_boundary_requirement(repo_git, config, repo_name):
     return True, reason
 
 
-def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_override=None, requirements=None, used_model_out=None, retarget=False, avoid_paths=None, local_first=False):
+def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_override=None, requirements=None, used_model_out=None, retarget=False, avoid_paths=None, local_first=False, cloud_ok=False):
     """local_first: try the LM-hosted local coder (llm_client.lm_complete, task
     "fix") before any cloud model -- used when the frontier reviewer's findings
     go back to the coder, so the cheap models get the first go at them.
@@ -5062,7 +5062,9 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_
             requirements = LlmRequirements(complexity="large", needs_structured_output=True)
         # A fresh fix (no earlier-attempt exclusions, no pin) goes to the LM pool
         # first; the checkout path below bypasses call_llm's lm_task routing.
-        local_first = (local_first or llm_client.lm_pool_only(config)
+        # cloud_ok (the run's last attempt, fix_frontier_last_attempt) lets pool-only mode fall through
+        # to the next untried cloud rung of the coding ladder after the pool has failed.
+        local_first = (local_first or (llm_client.lm_pool_only(config) and not cloud_ok)
                        or not (requirements.exclude_models or requirements.pin_key or requirements.restrict))
         requirements = dataclasses.replace(
             requirements, min_context_tokens=max(requirements.min_context_tokens, len(prompt) // 4))
@@ -6340,7 +6342,9 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         fix_code = apply_ai_fix(path, fix_body, error_context, task_id=issue_id, requirements=reqs, used_model_out=used_model_out,
                                                 retarget=(last_failure.get("kind") == "review_rejected"),
                                                 avoid_paths=sorted(modified_paths),
-                                                local_first=_frontier_rework_local(last_failure, used_model_out))
+                                                local_first=_frontier_rework_local(last_failure, used_model_out),
+                                                cloud_ok=bool(attempt == max_attempts and max_attempts > 1
+                                                              and config.get("fix_frontier_last_attempt", True)))
                         success_applied, fixes, confidence = parse_and_apply(
                             fix_code, path, feedback_out=parse_feedback)
                     # Remember which model built this fix.
