@@ -1,12 +1,13 @@
 """AI fix pipeline: issue analysis, sandboxed fix generation/application, verification, and per-issue orchestration (extracted from main.py)."""
 # Standard library and third-party modules used across the pipeline (git = GitPython).
 import base64, contextlib, dataclasses, fnmatch, git, json, os, re, requests, shutil, tempfile, threading, time, traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 # PyGithub client and its API error type.
 from github import Github, GithubException
 
 # Boundary rules, the LLM client, and branch-naming/push policy.
 import feature_boundary
+import github_ops
 import llm_client
 from branch_policy import auto_branch_name, integration_branch, may_direct_push, may_force_push
 
@@ -1530,6 +1531,66 @@ def _retry_budget(rec):
 _SENTINEL_ESCALATION = "**Escalated by the LM hub log sentinel**"
 
 
+_CREDENTIAL_RE = re.compile(
+    r"(?i)\b(?:password|passwd|pwd|secret|token|api[_ -]?key|bearer|authorization|cookie|session[_ -]?id|credential)\b[\"']?\s*(?:is|was|[:=])?\s*[\"']?(?:(?:bearer|basic|token)\s+)?[^\s\"',}]+"
+    r"|://[^\s/@]*@|\b(?:ghp|gho|ghs|github_pat|sk|xox[a-z])[-_][A-Za-z0-9_-]{16,}|\b[A-Za-z0-9+/_-]{32,}\b")
+
+
+def _public_reason(text):
+    """A model-written reason made safe for a public issue. Fails closed: text that mentions
+    a credential at all is replaced whole, because pattern redaction cannot find the end of
+    a quoted or spaced secret. Otherwise identities and token shapes are redacted, and the
+    text is cut to 600 characters."""
+    text = str(text or "")
+    if _CREDENTIAL_RE.search(text):
+        return "the analysis refers to credentials, so its text is withheld from this public issue."
+    return github_ops.redact_identity(text)[:600]
+
+
+def _stop_no_code_change(issue, issue_id, why, repo_git):
+    """The coder found no code cause: hand the issue to ops (label, record) and stop retrying."""
+    try:
+        if repo_git is not None:
+            repo_git.git.reset("--hard", "HEAD")
+            repo_git.git.clean("-fd")
+    except Exception:  # noqa: BLE001 - the tree is thrown away anyway
+        pass
+    why = _public_reason(why)
+    import log_scan
+    # The ops-alert label takes it out of the fixer's retry lanes; if GitHub refused the
+    # label or marker, record it failed instead (bounded retry, then a person), so the status matches the labels.
+    # The handoff runs before the comment so the comment never outruns the state.
+    handed = log_scan.mark_no_code_change(issue)
+    try:
+        # Model-written prose never goes into the public comment (a secret can take any shape);
+        # the redacted reason stays in AB's own record. The analysis is already on the issue.
+        issue.create_comment("🤖 **AppBuilder Triage**\n\nThe coder found no code change that fixes this, so it "
+                             "is an operational matter for a person to look at."
+                             + ("" if handed else "\n\n(The ops-alert handoff failed; AppBuilder will retry it a "
+                                                  "bounded number of times, then ask a person.)"))
+    except Exception as ce:  # noqa: BLE001 - the comment is best effort
+        logger.warning(f"Could not post no-code-change comment to {issue_id}: {ce}")
+    stamp = datetime.now().isoformat()
+
+    def record(current):
+        """Record the outcome, keeping the issue's other fields (title, link, pipeline)."""
+        current[issue_id] = {**(current.get(issue_id) or {}),
+                             "status": "ops-alert" if handed else "failed",
+                             # A failed handoff has no new alert to trigger the bounded retry, so
+                             # count it as recurred: it is re-run after failed_retry_hours, then
+                             # ab-needs-human once the budget is spent.
+                             **({} if handed else {"last_recurrence_at": (datetime.fromisoformat(stamp)
+                                                                           + timedelta(seconds=1)).isoformat()}),
+                             "timestamp": stamp, "reason": ("No code change needed: " + why) if handed
+                             # Fixed text: _hand_to_human posts a failed record's reason publicly.
+                             else "No code change needed, but the ops-alert handoff failed."}
+
+    update_processed(record)
+    update_task_state(task_id=issue_id, action="end")
+    return False, ("Handed to ops: no code change needed" if handed
+                   else "Failed: no code change needed, ops handoff failed (retried a bounded number of times)")
+
+
 def analyze_issue(issue):
     """Decide whether an issue has enough information to attempt a fix.
 
@@ -1544,13 +1605,11 @@ def analyze_issue(issue):
     if _BUG_REPORT_ID_RE.search(issue.body or ""):
         logger.info("Triage: user-filed 'File a Bug' report — treating as actionable (skipping LLM triage).")
         return True, ""
-    # The LM hub log sentinel already triaged an escalation: its body carries the
-    # log slice and the sentinel's analysis, and operational faults are filed as
-    # ops-alert, never reaching here. The LLM check kept asking for "the code"
-    # (lm#1876, ldap#63) although the fixer reads the repo itself.
-    if _SENTINEL_ESCALATION in (issue.body or ""):
-        logger.info("Triage: LM hub sentinel escalation — treating as actionable (skipping LLM triage).")
-        return True, ""
+    # The LM hub log sentinel already triaged an escalation, so the LLM may not demand
+    # more evidence (lm#1876, ldap#63). It is still asked one question: does the analysis
+    # point at a code change? An analysis that only says "check health/load/queue depth"
+    # is operational, and the coder only invented unrelated edits for it (lm#1984).
+    sentinel = _SENTINEL_ESCALATION in (issue.body or "")
 
     # Gather the issue title, body and every comment as context.
     full_context = f"Issue Title: {issue.title}\nIssue Body: {issue.body}\n\n"
@@ -1570,14 +1629,27 @@ def analyze_issue(issue):
         strictness_instruction = "Specifically, for UI or runtime errors, prefer console logs or stack traces, but if the description is detailed enough for a senior engineer to hypothesize the bug accurately, mark it as actionable."
 
     # Ask for a JSON verdict on whether the issue is fixable as written.
+    if sentinel:
+        # A different question: the log slice is enough evidence, so only ask whether the
+        # analysis names a code cause or just asks an operator to look at the system.
+        question = (
+            "This is a log-sentinel escalation; its log slice is enough evidence, so never ask for more. "
+            "Answer actionable=true when the analysis or log points at a code cause or you are unsure. "
+            "Answer false ONLY when the analysis merely asks an operator to check health, load, queue "
+            "depth or a device, with no code cause; then also set \"operational\": true and put what the "
+            "operator should check in \"request\". A reply that asks for more evidence is not operational.\n")
+    else:
+        question = (
+            "Determine if this issue contains enough information to provide a code fix. \n"
+            f"{strictness_instruction}\n"
+            "Note: If this is an automated log alert, the provided log snippet is the primary evidence. Do not request a stack trace if a clear error is already present in the logs.\n"
+            "The fixer has the repository's full source code and runs its tests itself, so never ask for source code, file contents or test output.\n"
+            "If information is missing, specify exactly what is needed (e.g., 'Please provide the browser console output').\n\n")
     prompt = (
-        f"{full_context}\n\n"
-        f"Determine if this issue contains enough information to provide a code fix. \n"
-        f"{strictness_instruction}\n"
-        f"Note: If this is an automated log alert, the provided log snippet is the primary evidence. Do not request a stack trace if a clear error is already present in the logs.\n"
-        f"The fixer has the repository's full source code and runs its tests itself, so never ask for source code, file contents or test output.\n"
-        f"If information is missing, specify exactly what is needed (e.g., 'Please provide the browser console output').\n\n"
-        "Return ONLY a JSON object: {\"actionable\": boolean, \"request\": \"message if not actionable\"}"
+        f"{full_context}\n\n" + question
+        + ("Return ONLY a JSON object: {\"actionable\": boolean, \"operational\": boolean, \"request\": \"message if not actionable\"}"
+           if sentinel else
+           "Return ONLY a JSON object: {\"actionable\": boolean, \"request\": \"message if not actionable\"}")
     )
     # Ask a trivial-size model; LLM errors fall through to the except below.
     try:
@@ -1591,8 +1663,20 @@ def analyze_issue(issue):
         match = re.search(r'\{.*\}', res, re.DOTALL)
         if match:
             data = _robust_json_loads(match.group())
-            return data.get("actionable", False), data.get("request", "More information is needed to proceed with a fix.")
-        # No JSON object in the reply.
+            actionable = data.get("actionable", False)
+            if sentinel and (not isinstance(actionable, bool)
+                             or "actionable" not in data
+                             or (actionable is False and (data.get("operational") is not True
+                                                          or not str(data.get("request") or "").strip()))):
+                # Only a real boolean is a verdict, and only an explicit operational one leaves
+                # the fixer (a false that asks for evidence is not an ops handoff).
+                actionable = True
+            request = data.get("request", "More information is needed to proceed with a fix.")
+            # A null request would crash the comment; an empty string keeps its old meaning.
+            return actionable, "More information is needed to proceed with a fix." if request is None else str(request)
+        # No JSON object in the reply; a sentinel escalation fails safe to the fixer.
+        if sentinel:
+            return True, ""
         return False, "Information provided is not in a usable format. Please provide more details."
     except Exception as e:
         # Log the error (quieter for cooldowns) and treat the issue as actionable.
@@ -4907,6 +4991,8 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_
         "- Make the SMALLEST change that fixes the issue. Do NOT return the whole "
         "file; return only the snippet(s) that change.\n"
         "- Multiple edits are allowed and may target different files.\n"
+        "- If the report is an operational fault or load problem with NO code cause, do not "
+        "invent edits: return {\"no_change\": \"<why no code change fixes it>\", \"edits\": []}.\n"
         "Example: {\"confidence\": 0.97, \"edits\": [{\"file\": \"WebUI/main.js\", "
         "\"search\": \"    await badName();\", \"replace\": \"    await goodName();\"}]}"
     )
@@ -5519,6 +5605,11 @@ def parse_and_apply(content, repo_path, *, feedback_out=None):
             logger.info(f"Applied fix to file: {filepath}")
         # Nothing applied: log why and fail.
         if not applied:
+            # The coder says the report has no code cause: stop rather than retry.
+            if not edits and not fixes and isinstance(data.get("no_change"), str) and data["no_change"].strip():
+                feedback["no_change"] = data["no_change"].strip()[:600]
+                feedback["last_reason"] = "no_change_needed"
+                return False, {}, 0.0
             _detail = "; ".join(feedback["last_failures"] or []) or \
                       "all edits rejected as unsafe or out-of-repo"
             logger.error(f"No fixes could be applied ({_detail}).")
@@ -5892,6 +5983,10 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
         actionable, request_msg = analyze_issue(issue)
 
         # Not actionable: ask the reporter for what is missing, record it, and stop.
+        if not actionable and _SENTINEL_ESCALATION in (issue.body or ""):
+            # An operational analysis with no code cause goes to ops, not back to the reporter.
+            logger.info(f"Issue {repo_name}:{issue_num}: sentinel analysis has no code cause; handing to ops")
+            return _stop_no_code_change(issue, issue_id, request_msg, None)
         if not actionable:
             logger.info(f"Issue {repo_name}:{issue_num} is non-actionable: {request_msg}")
             try:
@@ -6164,6 +6259,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         # fix its JSON instead of to requote the file text.
                         _reason = parse_feedback.get("last_reason") or "invalid_json"
                         _misses = parse_feedback.get("last_failures") or []
+                        if _reason == "no_change_needed":
+                            return _stop_no_code_change(issue, issue_id, parse_feedback["no_change"], repo_git)
                         if _reason == "edit_anchor_miss":
                             _detail = "; ".join(_misses)[:800]
                             failure_msg = (
