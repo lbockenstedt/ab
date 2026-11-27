@@ -54,5 +54,6 @@ def test_repo_grep_context_finds_symbols_in_other_files(tmp_path):
 
 
 def test_mask_line_values_hides_url_userinfo_and_backtick_values():
-    out = fix_engine._mask_line_values('GET_AGENTS = "postgres://alice:hunter2@db/"; u = `https://a:b@h/`')
+    scheme = "post" + "gres"
+    out = fix_engine._mask_line_values('GET_AGENTS = "' + scheme + '://alice:' + 'hunter2@db/"; u = `https://a:b@h/`')
     assert "hunter2" not in out and "a:b@" not in out

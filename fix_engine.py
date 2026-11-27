@@ -6207,6 +6207,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             # (kind, detail, confidence, threshold) so the UI can lead with the
             # cause instead of truncating it away.
             last_failure = {}
+            review_rejections = 0  # reviewer Rejects this run, kept apart from pre-review failures
             # Final verdict and confidence; reject by default.
             final_verdict = "Reject"
             final_confidence = 0.0
@@ -6513,14 +6514,16 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             # Rejected: pass the critique to the next attempt.
                             if review_verdict == "Reject":
                                 logger.warning(f"Reviewer REJECTED fix for {issue_id}: {critique}")
+                                review_rejections += 1
                                 # A health-check timing/slowness finding that a reviewer rejected usually traces
                                 # to a slow host, not code; hand it to ops instead of burning more pool attempts.
                                 import log_scan
-                                if (config.get("perf_reject_to_ops", True) and attempt > 1
+                                if (config.get("perf_reject_to_ops", True) and review_rejections >= 2
+                                        and attempt == max_attempts
                                         and log_scan.is_performance_finding(getattr(issue, "title", ""))):
                                     return _stop_no_code_change(
                                         issue, issue_id,
-                                        "A reviewer rejected the code fixes for this health-check finding, so the "
+                                        "A reviewer rejected the final code fix (after earlier rejected attempts) for this health-check finding, so the "
                                         "cause is probably the host or network, not the code. Reviewer: "
                                         + str(critique or "")[:400], repo_git)
                                 error_context = f"Reviewer rejected the fix: {critique}"
