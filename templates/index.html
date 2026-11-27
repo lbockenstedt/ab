@@ -2431,6 +2431,10 @@
                                     <label for="fix_logdetected_enabled" class="text-xs font-medium text-slate-700" title="Attempt AUTO-FIXES for log-detected / automated-fix issues. Off by default so the fixer doesn't churn on log-scraped issues. Bug + Critical always fix.">Auto-fix log-detected issues <span class="text-slate-500">(Bug &amp; Critical always fix)</span></label>
                                 </div>
                                 <div class="flex items-center gap-3">
+                                    <input type="checkbox" name="held_requeue_enabled" id="held_requeue_enabled" {{ 'checked' if settings.get('held_requeue_enabled', True) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
+                                    <label for="held_requeue_enabled" class="text-xs font-medium text-slate-700" title="Issues held with 'no configured model meets this fix' (written during an LLM outage) go back to the bounded retry lane, 3 per scan, while an LLM endpoint is online.">Requeue issues held for want of a model</label>
+                                </div>
+                                <div class="flex items-center gap-3">
                                     <input type="checkbox" name="ghost_close_enabled" id="ghost_close_enabled" {{ 'checked' if settings.get('ghost_close_enabled', True) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                     <label for="ghost_close_enabled" class="text-xs font-medium text-slate-700" title="Close open log-detected issues that are ghosts: AppBuilder's own refused-edit log lines, or an LLM outage alert once an endpoint is back online.">Auto-close ghost alerts</label>
                                 </div>
