@@ -5205,6 +5205,56 @@ def _snippet_language_mismatch_hint(search, filepath):
     return None
 
 
+def _closest_line_hint(current, search):
+    """For a search snippet that is not in the file, name the file's closest real line so the
+    retry can anchor on text that exists (pool models often write anchors from memory).
+    Returns " — closest line in the file is N: '...'" or "" when nothing is close."""
+    import difflib
+    first = next((ln.strip() for ln in search.splitlines() if ln.strip()), "")
+    if len(first) < 8:
+        return ""
+    lines = current.splitlines()
+    stripped = [ln.strip() for ln in lines]
+    close = difflib.get_close_matches(first, stripped, n=1, cutoff=0.6)
+    if not close:
+        return ""
+    # Quoted values and long tokens are masked: the line number and code shape locate the anchor,
+    # and a secret in the file never reaches a log or an issue.
+    shape = re.sub(r"""(["'])(?:\\.|(?!\1).)*\1""", r"\1...\1", close[0])
+    shape = re.sub(r"\b[A-Za-z0-9+/_=-]{20,}\b", "...", shape)
+    return f" — closest line in the file is {stripped.index(close[0]) + 1}: {shape[:120]!r} (string values masked)"
+
+
+def _set_duplicate_noop(old_text, new_text):
+    """True when a Python edit only adds items a set literal already holds. Both texts are parsed,
+    set literals are collapsed to their distinct items, and the edit is a no-op when the trees then
+    match although they differed before (a comment-only edit differs in neither). A set that
+    already held the name changes nothing at runtime, so the reviewer would reject the diff."""
+    import ast as _a
+
+    class _Dedupe(_a.NodeTransformer):
+        """Collapse repeated items in set literals."""
+        def visit_Set(self, node):
+            """Keep the first of each distinct element."""
+            self.generic_visit(node)
+            seen, kept = set(), []
+            for el in node.elts:
+                key = _a.dump(el)
+                if isinstance(el, _a.Constant) and key in seen:
+                    continue  # only literal items are safe to collapse; a call may have side effects
+                seen.add(key)
+                kept.append(el)
+            node.elts = kept
+            return node
+
+    try:
+        old_t, new_t = _a.parse(old_text), _a.parse(new_text)
+        raw_equal = _a.dump(old_t) == _a.dump(new_t)
+        return not raw_equal and _a.dump(_Dedupe().visit(old_t)) == _a.dump(_Dedupe().visit(new_t))
+    except (SyntaxError, ValueError, RecursionError):
+        return False
+
+
 def _syntax_regressed(rel_path, old_text, new_text):
     """True when an edit turns a Python file that PARSED into one that does not.
 
@@ -5488,6 +5538,11 @@ def parse_and_apply(content, repo_path, *, feedback_out=None):
                     # discarding the edit.
                     _span = _relaxed_edit_span(current, search)
                     if _span:
+                        if filepath.endswith(".py") and _set_duplicate_noop(
+                                current, current[:_span[0]] + str(replace) + current[_span[1]:]):
+                            _miss.append(f"{filepath}: this edit only repeats items a set already holds, "
+                                         "so it would change nothing — find the real cause instead")
+                            continue
                         logger.info(f"Edit matched {filepath!r} only after whitespace "
                                     f"normalisation — applying (unique match).")
                         file_contents[full_path] = (current[:_span[0]] + str(replace)
@@ -5500,6 +5555,7 @@ def parse_and_apply(content, repo_path, *, feedback_out=None):
                     _first = (search.strip().splitlines() or [""])[0][:160]
                     _hint = _snippet_language_mismatch_hint(search, filepath)
                     _hint_sfx = f" — {_hint}" if _hint else ""
+                    _hint_sfx += _closest_line_hint(current, search)
                     _miss.append(f"{filepath}: search snippet not found (starts with: {_first!r}){_hint_sfx}")
                     # _first embedded IN the ERROR line (not left only in _miss/
                     # last_failures): the self-log scanner captures single ERROR
@@ -5511,6 +5567,13 @@ def parse_and_apply(content, repo_path, *, feedback_out=None):
                         f"Edit search snippet not found in {filepath!r}; skipping this edit "
                         f"(search starts with: {_first!r}){_hint_sfx}"
                     )
+                    continue
+                # An edit that only repeats an item a set literal already holds changes nothing.
+                if filepath.endswith(".py") and _set_duplicate_noop(
+                        current, current.replace(search, str(replace))):
+                    _miss.append(f"{filepath}: this edit only repeats items a set already holds, so it "
+                                 "would change nothing — find the real cause instead")
+                    logger.warning(f"Edit to {filepath!r} only repeats existing set items; skipping")
                     continue
                 # Several matches: replace them all, with a warning.
                 if count > 1:
