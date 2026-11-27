@@ -370,6 +370,9 @@ _SELF_SCAN_NOISE = re.compile(
     # a defect in AppBuilder. Keep the guard; only suppress its own log line.
     r'|Refusing to apply fix with unsafe path:'
     r'|No verified fix found after'
+    # The coder's rejected edits ("Skipping edit: target file does not exist", "Skipping
+    # malformed edit"): a bad model reply that was refused, not a defect in AppBuilder.
+    r'|Skipping (?:malformed )?edit'
     r'|Could not save to persistent storage'
     r'|Critical failure saving config'
     # (3) reviewer-panel chatter — retried and/or escalated in the same call.
@@ -1775,6 +1778,38 @@ def escalation_is_operational(summary, log_slice, analysis, verdict):
     return any(is_operational_fault(t) for t in texts)
 
 
+# Evidence of an LLM availability alert (outage, no provider, no model); it is stale once an endpoint is online.
+_LLM_AVAILABILITY_RE = re.compile(
+    r"LLM outage|No LLM providers configured", re.IGNORECASE)
+# The fix engine's own refused-edit lines; only these make a ghost, not the rest of _SELF_SCAN_NOISE.
+_REFUSED_EDIT_RE = re.compile(r"Skipping (?:malformed )?edit|search snippet not found")
+_AB_CORE_MARK = "<!-- bf-module: ab-core -->"  # the module marker AB puts on issues about itself
+
+
+def ghost_reason(body, any_llm_online):
+    """Why an open log-detected issue is a ghost, or "" when it is not one.
+
+    Two classes, both about AppBuilder itself: the evidence is the fix engine's own refusal
+    of a bad model edit (it should never have been filed), or an LLM outage or no-provider alert whose
+    outage is over because an endpoint is online now (`any_llm_online` is True, never None)."""
+    body = body or ""
+    if "**Automated Error Detection**" not in body:
+        return ""  # only issues AB filed from its logs; a person's report is never a ghost
+    if _AB_CORE_MARK not in body:
+        return ""  # a ghost is about AppBuilder itself; other modules' issues are real
+    # Judge only the quoted log evidence, never the surrounding text; a traceback is a real fault.
+    m = re.search(r"### Log Evidence:\n```\n(.*?)\n```", body, re.DOTALL)
+    evidence = m.group(1) if m else ""
+    if not evidence or "Traceback" in evidence:
+        return ""
+    body = evidence
+    if _REFUSED_EDIT_RE.search(body):
+        return "the log line is AppBuilder's own fix-engine message (a refused model edit), not a defect"
+    if any_llm_online is True and _LLM_AVAILABILITY_RE.search(body):
+        return "the LLM outage this alert reported is over: an LLM endpoint is online now"
+    return ""
+
+
 _OPS_SECTION = "### Operational fault"  # in the body of every issue AB files as ops-alert
 _OPS_MARK = "<!-- ab-ops-alert -->"  # added to the body when AB relabels an older issue
 
@@ -2163,6 +2198,7 @@ __all__ = [
     'scan_bugs',
     'file_escalated_issue',
     'reclassify_ops_alerts',
+    'ghost_reason',
     '_safe_json_field',
     '_bug_report_fix_context',
     '_module_log_fix_context',

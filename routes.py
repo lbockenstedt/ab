@@ -2832,6 +2832,7 @@ async def settings_page(request: Request):
     config.setdefault("bug_reports_enabled", True)
     config.setdefault("feature_requests_enabled", True)
     config.setdefault("fix_logdetected_enabled", False)
+    config.setdefault("ghost_close_enabled", True)
     config.setdefault("escalation_specific_titles", True)
     # Project skills (skills_loader.py) — repo-committed recipes (add-simulation,
     # dual-copy-guard, ...) AppBuilder follows for fix/build work. Feature
@@ -3796,6 +3797,7 @@ async def save_settings(request: Request):
     # Auto-FIX log-detected / automated-fix issues (default OFF; Bug + Critical
     # always fix). Stops the fixer churning on log-scraped issues.
     config_data["fix_logdetected_enabled"] = data.get("fix_logdetected_enabled") == "on"
+    config_data["ghost_close_enabled"] = data.get("ghost_close_enabled") == "on"
     # Title hub-escalated log issues after the actual problem (log_scan, default on).
     config_data["escalation_specific_titles"] = data.get("escalation_specific_titles") == "on"
     # Hub health check (health_check.py): on/off plus every threshold. A blank or
