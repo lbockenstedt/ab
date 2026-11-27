@@ -426,3 +426,17 @@ def test_fix_apply():
 if __name__ == "__main__":
     print("Running fix_engine apply/windowing self-test...")
     sys.exit(main())
+
+
+def test_no_change_reply_is_reported_not_retried_as_no_edits():
+    """A coder that finds no code cause answers {"no_change": why, "edits": []}; the
+    retry loop stops on it instead of asking for edits again (lm#1984, ab#647)."""
+    apply = _load_funcs()["parse_and_apply"]
+    d = tempfile.mkdtemp()
+    fb = {}
+    ok, applied, _ = apply(json.dumps({"no_change": "only a slow device", "edits": []}), d, feedback_out=fb)
+    assert not ok and not applied
+    assert fb["last_reason"] == "no_change_needed" and fb["no_change"] == "only a slow device"
+    fb = {}
+    apply(json.dumps({"confidence": 0.9, "edits": []}), d, feedback_out=fb)
+    assert fb["last_reason"] == "no_edits"
