@@ -313,7 +313,9 @@ _AUTH_EXEMPT_EXACT = {"/api/health", "/login", "/logout", "/setup-admin",
                       "/favicon.ico", "/apple-touch-icon.png",
                       "/apple-touch-icon-precomposed.png"}
 # Path prefixes that need no login (static files and the /v1 proxy, which has its own auth).
-_AUTH_EXEMPT_PREFIX = ("/static/", "/assets/", "/v1/")
+# /admin/ops/ has no session: the route itself enforces a loopback peer AND a
+# root-minted token (admin_ops._guard), which is the real control.
+_AUTH_EXEMPT_PREFIX = ("/static/", "/assets/", "/v1/", "/admin/ops/")
 
 
 def _auth_exempt(path: str) -> bool:
@@ -769,6 +771,12 @@ from chat import *  # noqa: E402,F401,F403
 from fix_engine import *  # noqa: E402,F401,F403
 from routes import *  # noqa: E402,F401,F403
 app.include_router(router)
+# Loopback-only, token-gated read-only ops API (/admin/ops/*); see admin_ops.py.
+from admin_ops import router as _admin_ops_router, load_or_mint_token as _mint_admin_ops_token  # noqa: E402
+app.include_router(_admin_ops_router)
+if not os.environ.get("AB_DISABLE_WORKERS"):
+    # Mint the token now so an operator can `sudo cat` it right after startup.
+    _mint_admin_ops_token()
 # Anthropic-compatible LLM-router proxy (/v1/*). Does its own api-key auth
 # (see llm_proxy), so it's exempt from the WebUI session middleware above.
 from llm_proxy import router as _llm_proxy_router  # noqa: E402
