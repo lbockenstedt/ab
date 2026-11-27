@@ -8,10 +8,10 @@ SRC = 'KEEP = {\n    "GET_SYSTEM_STATS", "GET_AGENTS", "RUN_COMMAND",\n}\n\ndef 
 
 def test_closest_line_hint_names_a_real_line():
     """A near-miss anchor gets the file's real line number and text; nothing close gives no hint."""
-    hint = fix_engine._closest_line_hint(SRC, "def handler(cmd, data):\n    pass")
+    hint = fix_engine._closest_line_hint(SRC, "def handler(cmd, data):\n    pass", "x.py")
     assert "closest line in the file is 5" in hint and "def handler(cmd_type, data):" in hint
-    assert fix_engine._closest_line_hint(SRC, "zzzzzzzzzzzzzzzz unrelated") == ""
-    assert fix_engine._closest_line_hint(SRC, "x") == ""
+    assert fix_engine._closest_line_hint(SRC, "zzzzzzzzzzzzzzzz unrelated", "x.py") == ""
+    assert fix_engine._closest_line_hint(SRC, "x", "x.py") == ""
 
 
 def test_set_duplicate_noop_only_when_nothing_changes():
@@ -26,7 +26,7 @@ def test_set_duplicate_noop_only_when_nothing_changes():
 
 
 def test_closest_line_hint_never_echoes_a_secret():
-    """A near-miss anchor beside a credential line names its line and shape but never the value."""
+    """No hint for config files or credential-named lines, so a value never reaches a log."""
     cfg = 'JWT_SIGNING_KEY = "hunter2hunter2"\nother = 1\n'
-    hint = fix_engine._closest_line_hint(cfg, 'JWT_SIGNING_KEY = "hunter3"')
-    assert "line in the file is 1" in hint and "hunter2" not in hint and "JWT_SIGNING_KEY" in hint
+    assert fix_engine._closest_line_hint(cfg, 'JWT_SIGNING_KEY = "hunter3"', "a.py") == ""
+    assert fix_engine._closest_line_hint("password: hunter2\n", "password: hunter3", "a.yml") == ""

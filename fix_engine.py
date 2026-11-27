@@ -5205,18 +5205,18 @@ def _snippet_language_mismatch_hint(search, filepath):
     return None
 
 
-def _closest_line_hint(current, search):
+def _closest_line_hint(current, search, filepath):
     """For a search snippet that is not in the file, name the file's closest real line so the
     retry can anchor on text that exists (pool models often write anchors from memory).
     Returns " — closest line in the file is N: '...'" or "" when nothing is close."""
     import difflib
     first = next((ln.strip() for ln in search.splitlines() if ln.strip()), "")
-    if len(first) < 8:
+    if len(first) < 8 or not filepath.endswith((".py", ".js", ".mjs", ".ts")):  # config files may hold secrets
         return ""
     lines = current.splitlines()
     stripped = [ln.strip() for ln in lines]
     close = difflib.get_close_matches(first, stripped, n=1, cutoff=0.6)
-    if not close:
+    if not close or re.search(r"(?i)token|secret|passw|api_?key|credential|bearer|signing", close[0]):
         return ""
     # Quoted values and long tokens are masked: the line number and code shape locate the anchor,
     # and a secret in the file never reaches a log or an issue.
@@ -5555,7 +5555,7 @@ def parse_and_apply(content, repo_path, *, feedback_out=None):
                     _first = (search.strip().splitlines() or [""])[0][:160]
                     _hint = _snippet_language_mismatch_hint(search, filepath)
                     _hint_sfx = f" — {_hint}" if _hint else ""
-                    _hint_sfx += _closest_line_hint(current, search)
+                    _hint_sfx += _closest_line_hint(current, search, filepath)
                     _miss.append(f"{filepath}: search snippet not found (starts with: {_first!r}){_hint_sfx}")
                     # _first embedded IN the ERROR line (not left only in _miss/
                     # last_failures): the self-log scanner captures single ERROR
