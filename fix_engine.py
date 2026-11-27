@@ -4822,6 +4822,9 @@ def _repo_grep_context(repo_path, identifiers, skip_paths=(), max_chars=6000, pe
             return ""
         hits = [ln for ln in out.splitlines() if ln.split(":", 1)[0] not in skip_paths][:per_id]
         for ln in hits:
+            # Cross-file lines can hold literal secrets; drop any naming a credential.
+            if re.search(r"(?i)token|secret|passw|api_?key|credential|bearer|signing|private[_ ]?key", ln):
+                continue
             row = ln[:200]
             if used + len(row) > max_chars:
                 return "\n".join(rows)
@@ -5066,6 +5069,8 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_
         # to the next untried cloud rung of the coding ladder after the pool has failed.
         local_first = (local_first or (llm_client.lm_pool_only(config) and not cloud_ok)
                        or not (requirements.exclude_models or requirements.pin_key or requirements.restrict))
+        if cloud_ok:
+            local_first = False
         requirements = dataclasses.replace(
             requirements, min_context_tokens=max(requirements.min_context_tokens, len(prompt) // 4))
         # Hold the model that WRITES the fix to the same bar as the panel that
