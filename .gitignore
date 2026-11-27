@@ -28,3 +28,4 @@ secrets.json
 
 # pytest scratch (legacy location; tests now use a temp dir)
 .test_agentic_repo_tools/
+admin_ops_token

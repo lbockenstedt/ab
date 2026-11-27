@@ -1274,6 +1274,44 @@ def _hand_to_human(issue, rec):
         return False
 
 
+def close_ghost_issues(repo_obj, any_llm_online):
+    """Close open log-detected issues that are ghosts (see log_scan.ghost_reason), with a
+    comment saying why and the ab-closed label, and mark their record closed so no retry
+    lane picks them up. A real recurrence reopens them through the usual recurrence path.
+    Best effort: one bad issue must not stop the scan. Returns the issue numbers closed."""
+    closed = []
+    try:
+        issues = repo_obj.get_issues(labels=["log-detected"], state="open")
+    except Exception as e:  # noqa: BLE001 - the sweep is optional
+        logger.warning(f"Ghost sweep skipped for {repo_obj.full_name}: {e}")
+        return closed
+    for issue in issues:
+        try:
+            if getattr(issue, "pull_request", None):
+                continue  # the issues API also lists PRs
+            why = main.ghost_reason(issue.body, any_llm_online)
+            if not why:
+                continue
+            issue_id = f"{repo_obj.full_name}:{issue.number}"
+            issue.create_comment("🤖 **AppBuilder Triage**\n\nClosing as a ghost alert: " + why
+                                 + ". If it comes back as a real fault the recurrence check reopens it.")
+            main._apply_closed_label(repo_obj, issue, issue_id)
+            issue.edit(state="closed")
+            stamp = datetime.now().isoformat()
+
+            def close(current, issue_id=issue_id, why=why):
+                """Record the close, keeping the issue's other fields."""
+                current[issue_id] = {**(current.get(issue_id) or {}), "status": "closed",
+                                     "timestamp": stamp, "reason": "Ghost alert: " + why}
+
+            update_processed(close)
+            closed.append(issue.number)
+            logger.info(f"Closed ghost alert {issue_id}: {why}")
+        except Exception as e:  # noqa: BLE001 - one bad issue must not stop the sweep
+            logger.warning(f"Ghost check skipped #{getattr(issue, 'number', '?')}: {e}")
+    return closed
+
+
 def _update_record(issue_id, processed, **fields):
     """Set fields on an issue's record in both the saved and the cycle's store."""
     def patch(current):
@@ -1423,6 +1461,9 @@ def scan_repo_issues(gh_current, config, processed):
                     main.reclassify_ops_alerts(repo_obj)
                 except Exception as e:  # noqa: BLE001 - relabelling must not stop the scan
                     logger.warning(f"ops-alert reclassification skipped for {repo_name}: {e}")
+                # Ghost alerts (AB's own refused edits, an LLM outage that is over) are closed.
+                if config.get("ghost_close_enabled", True):
+                    close_ghost_issues(repo_obj, state.get("any_llm_online"))
                 if "ANY" in labels:
                     issues = repo_obj.get_issues(state="open")
                 else:
