@@ -130,3 +130,14 @@ def test_cloud_access_key_is_masked():
     """AWS_ACCESS_KEY_ID=... style values are masked."""
     import admin_ops
     assert "AKIAIOSFODNN7EXAMPLE" not in admin_ops._redact("AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE")
+
+
+def test_retry_validates_and_calls_the_dashboard_retry(loop, monkeypatch):
+    """POST /admin/ops/retry rejects a bad id and otherwise runs routes._retry_issue_when_idle."""
+    import routes
+    seen = []
+    monkeypatch.setattr(routes, "_retry_issue_when_idle", lambda i: seen.append(i) or {"status": "triggered"})
+    assert loop.post("/admin/ops/retry", json={"issue_id": "bad"}, headers=HDR).status_code == 400
+    assert loop.post("/admin/ops/retry", json={"issue_id": "o/r:5"}).status_code == 403
+    r = loop.post("/admin/ops/retry", json={"issue_id": "o/r:5"}, headers=HDR)
+    assert r.status_code == 200 and seen == ["o/r:5"]
