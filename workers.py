@@ -31,7 +31,7 @@ import threading
 import time
 # Thread pool, timestamps, .env loading and the GitHub API.
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from github import Github, GithubException
 
@@ -1274,6 +1274,57 @@ def _hand_to_human(issue, rec):
         return False
 
 
+HELD_NO_MODEL_REASON = "no configured model meets this fix's requirements"
+
+
+def requeue_stale_holds(processed, any_llm_online, config, limit=3):
+    """Hand issues held with "no configured model meets" back to the bounded retry lane.
+
+    Such a hold is written when every model was unusable (an outage, the pool starting) and
+    nothing ever retried it. While an endpoint is online now, up to ``limit`` of them per
+    scan (matched to the few pool workers) become ``failed`` with a later recurrence stamp, so
+    failed_retry_decision re-runs them after failed_retry_hours, at most failed_retry_max
+    times, and then labels them ab-needs-human. Returns the ids requeued."""
+    if any_llm_online is not True or not config.get("held_requeue_enabled", True):
+        return []
+    if int(float(config.get("failed_retry_max", 2) or 0)) <= 0:
+        return []  # retries off: a failed record would never be retried, so keep the hold visible
+    done = []
+
+    def requeue(current):
+        """Convert up to ``limit`` eligible held records, keeping their other fields."""
+        for issue_id, rec in current.items():
+            if len(done) >= limit:
+                break
+            if rec.get("status") != "awaiting_human" or rec.get("reason") != HELD_NO_MODEL_REASON:
+                continue
+            if rec.get("needs_human_at"):
+                continue  # already escalated to a human; keep that handoff
+            try:
+                held_at = datetime.fromisoformat(str(rec.get("timestamp")))
+            except ValueError:
+                continue
+            rec.update({"status": "failed", "failure_kind": "held_no_model", "error": HELD_NO_MODEL_REASON,
+                        "last_recurrence_at": (held_at + timedelta(seconds=1)).isoformat()})
+            done.append(issue_id)
+        return {i: dict(current[i]) for i in done}
+
+    for issue_id, rec in update_processed(requeue).items():
+        processed[issue_id] = rec
+        logger.info(f"{issue_id}: held with no usable model and an LLM is online now; requeued for retry.")
+    return done
+
+
+def _clear_needs_human_label(gh, issue_id):
+    """Remove the stale ab-needs-human label from a requeued issue ("owner/repo:N"), best effort,
+    so a retry that succeeds does not leave the issue marked as needing a human."""
+    try:
+        repo_name, number = issue_id.rsplit(":", 1)
+        gh.get_repo(repo_name).get_issue(int(number)).remove_from_labels(NEEDS_HUMAN_LABEL)
+    except Exception as e:  # noqa: BLE001 - label may be absent or the issue gone
+        logger.debug(f"{issue_id}: could not clear {NEEDS_HUMAN_LABEL}: {e}")
+
+
 def close_ghost_issues(repo_obj, any_llm_online):
     """Close open log-detected issues that are ghosts (see log_scan.ghost_reason), with a
     comment saying why and the ab-closed label, and mark their record closed so no retry
@@ -1443,6 +1494,12 @@ def scan_repo_issues(gh_current, config, processed):
 
     monitored_repos = main.get_monitored_repos(config)
     max_workers = int(config.get("MAX_CONCURRENT_FIXES", 5))
+    # Issues held for want of a model during an outage go back to the retry lane, a few per scan.
+    try:
+        for issue_id in requeue_stale_holds(processed, state.get("any_llm_online"), config):
+            _clear_needs_human_label(gh_current, issue_id)
+    except Exception as e:  # noqa: BLE001 - the requeue is optional
+        logger.warning(f"Held-issue requeue skipped: {e}")
 
     # Scan each monitored repo in turn.
     try:
