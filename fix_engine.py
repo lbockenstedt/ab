@@ -5077,7 +5077,8 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_
         # to the next untried cloud rung of the coding ladder after the pool has failed.
         local_first = (local_first or (llm_client.lm_pool_only(config) and not cloud_ok)
                        or not (requirements.exclude_models or requirements.pin_key or requirements.restrict))
-        if cloud_ok:
+        # Only pool-only mode changes: with it off the picker already chooses, so cloud_ok is moot.
+        if cloud_ok and llm_client.lm_pool_only(config):
             local_first = False
         requirements = dataclasses.replace(
             requirements, min_context_tokens=max(requirements.min_context_tokens, len(prompt) // 4))
