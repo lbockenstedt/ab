@@ -55,6 +55,8 @@ def _load_apply_ai_fix(call_llm_stub, llm_client_stub):
         },
         "identify_files_to_fix": lambda *a, **k: [],
         "_issue_identifiers": lambda *a, **k: [],
+        "_mask_line_values": lambda l: l,
+        "_repo_grep_context": lambda *a, **k: "",
         "os": os,
         "logger": _NoLog(),
         "call_llm": call_llm_stub,
