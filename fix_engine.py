@@ -4801,6 +4801,46 @@ _ISSUE_STOP_TOKENS = {
 }
 
 
+_GREP_EXTS = (".py", ".js", ".mjs", ".ts", ".sh", ".html")
+
+
+def _mask_line_values(line):
+    """Mask what a source line may hold as a secret: URL userinfo, quoted or backtick string values
+    and 20+ character tokens. The code shape stays; the values never reach a prompt or a log."""
+    line = re.sub(r"(://)[^/\s@]+@", r"\1...@", line)
+    line = re.sub(r"""(["'`])(?:\\.|(?!\1).)*\1""", r"\1...\1", line)
+    return re.sub(r"\b[A-Za-z0-9+/_=-]{20,}\b", "...", line)
+
+
+def _repo_grep_context(repo_path, identifiers, skip_paths=(), max_chars=6000, per_id=6):
+    """Where the issue's code-like identifiers (GET_AGENTS, _KEEPALIVE_CMDS, fooBar) appear in the
+    whole checkout, as "path:line: text" rows. The pool model sees only the files in the prompt,
+    so this shows it every definition and use, including that a name it wants to add already
+    exists. Code files only (config files may hold secrets); files already in the prompt and
+    plain English words are skipped. Returns "" when nothing is found or git grep fails."""
+    import subprocess
+    syms = [i for i in identifiers if "_" in i or i.isupper() or (re.search(r"[a-z]", i) and re.search(r"[A-Z]", i[1:]))][:6]
+    rows, used = [], 0
+    for sym in syms:
+        try:
+            out = subprocess.run(["git", "grep", "-n", "-I", "-w", "-F", "-e", sym, "--"]
+                                 + [f"*{e}" for e in _GREP_EXTS],
+                                 cwd=repo_path, capture_output=True, text=True, timeout=20).stdout
+        except Exception:  # noqa: BLE001 - the extra context is optional
+            return ""
+        hits = [ln for ln in out.splitlines() if ln.split(":", 1)[0] not in skip_paths][:per_id]
+        for ln in hits:
+            # Cross-file lines can hold literal secrets; drop any naming a credential.
+            if re.search(r"(?i)token|secret|passw|api_?key|credential|bearer|signing|private[_ ]?key", ln):
+                continue
+            row = _mask_line_values(ln)[:200]
+            if used + len(row) > max_chars:
+                return "\n".join(rows)
+            rows.append(row)
+            used += len(row) + 1
+    return "\n".join(rows)
+
+
 def _issue_identifiers(issue_body):
     """Pull candidate code identifiers from an issue body (prioritising the
     ``Error:`` line) so a large file can be windowed around the buggy region
@@ -4907,7 +4947,7 @@ def _publication_boundary_requirement(repo_git, config, repo_name):
     return True, reason
 
 
-def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_override=None, requirements=None, used_model_out=None, retarget=False, avoid_paths=None, local_first=False):
+def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_override=None, requirements=None, used_model_out=None, retarget=False, avoid_paths=None, local_first=False, cloud_ok=False):
     """local_first: try the LM-hosted local coder (llm_client.lm_complete, task
     "fix") before any cloud model -- used when the frontier reviewer's findings
     go back to the coder, so the cheap models get the first go at them.
@@ -4969,6 +5009,15 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_
                     break
             except Exception as e:
                 logger.error(f"Could not read file {f_path}: {e}")
+    # Show where the issue's symbols appear across the whole checkout (the model sees only the
+    # files above), so it can see a name already exists or where a caller lives.
+    grep_chars = int(config.get("fix_repo_grep_chars", 6000) or 0)
+    if grep_chars > 0 and repo_path and os.path.isdir(repo_path):
+        found = _repo_grep_context(repo_path, identifiers, skip_paths=set(relevant_files), max_chars=grep_chars)
+        if found:
+            context_code += ("\n--- WHERE THE ISSUE'S SYMBOLS APPEAR ELSEWHERE IN THE REPO (path:line: text; "
+                             "not editable context, check before adding a name that already exists) ---\n"
+                             + found + "\n")
     # Ask for TARGETED search/replace edits, not a full-file rewrite: a local model
     # cannot faithfully reproduce a large file, and a truncated rewrite would delete
     # real code (the truncated-rewrite guard then aborts the whole fix). An edit
@@ -5024,8 +5073,13 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_
             requirements = LlmRequirements(complexity="large", needs_structured_output=True)
         # A fresh fix (no earlier-attempt exclusions, no pin) goes to the LM pool
         # first; the checkout path below bypasses call_llm's lm_task routing.
-        local_first = (local_first or llm_client.lm_pool_only(config)
+        # cloud_ok (the run's last attempt, fix_frontier_last_attempt) lets pool-only mode fall through
+        # to the next untried cloud rung of the coding ladder after the pool has failed.
+        local_first = (local_first or (llm_client.lm_pool_only(config) and not cloud_ok)
                        or not (requirements.exclude_models or requirements.pin_key or requirements.restrict))
+        # Only pool-only mode changes: with it off the picker already chooses, so cloud_ok is moot.
+        if cloud_ok and llm_client.lm_pool_only(config):
+            local_first = False
         requirements = dataclasses.replace(
             requirements, min_context_tokens=max(requirements.min_context_tokens, len(prompt) // 4))
         # Hold the model that WRITES the fix to the same bar as the panel that
@@ -5205,6 +5259,55 @@ def _snippet_language_mismatch_hint(search, filepath):
     return None
 
 
+def _closest_line_hint(current, search, filepath):
+    """For a search snippet that is not in the file, name the file's closest real line so the
+    retry can anchor on text that exists (pool models often write anchors from memory).
+    Returns " — closest line in the file is N: '...'" or "" when nothing is close."""
+    import difflib
+    first = next((ln.strip() for ln in search.splitlines() if ln.strip()), "")
+    if len(first) < 8 or not filepath.endswith((".py", ".js", ".mjs", ".ts")):  # config files may hold secrets
+        return ""
+    lines = current.splitlines()
+    stripped = [ln.strip() for ln in lines]
+    close = difflib.get_close_matches(first, stripped, n=1, cutoff=0.6)
+    if not close or re.search(r"(?i)token|secret|passw|api_?key|credential|bearer|signing", close[0]):
+        return ""
+    # Quoted values and long tokens are masked: the line number and code shape locate the anchor,
+    # and a secret in the file never reaches a log or an issue.
+    shape = _mask_line_values(close[0])
+    return f" — closest line in the file is {stripped.index(close[0]) + 1}: {shape[:120]!r} (string values masked)"
+
+
+def _set_duplicate_noop(old_text, new_text):
+    """True when a Python edit only adds items a set literal already holds. Both texts are parsed,
+    set literals are collapsed to their distinct items, and the edit is a no-op when the trees then
+    match although they differed before (a comment-only edit differs in neither). A set that
+    already held the name changes nothing at runtime, so the reviewer would reject the diff."""
+    import ast as _a
+
+    class _Dedupe(_a.NodeTransformer):
+        """Collapse repeated items in set literals."""
+        def visit_Set(self, node):
+            """Keep the first of each distinct element."""
+            self.generic_visit(node)
+            seen, kept = set(), []
+            for el in node.elts:
+                key = _a.dump(el)
+                if isinstance(el, _a.Constant) and key in seen:
+                    continue  # only literal items are safe to collapse; a call may have side effects
+                seen.add(key)
+                kept.append(el)
+            node.elts = kept
+            return node
+
+    try:
+        old_t, new_t = _a.parse(old_text), _a.parse(new_text)
+        raw_equal = _a.dump(old_t) == _a.dump(new_t)
+        return not raw_equal and _a.dump(_Dedupe().visit(old_t)) == _a.dump(_Dedupe().visit(new_t))
+    except (SyntaxError, ValueError, RecursionError):
+        return False
+
+
 def _syntax_regressed(rel_path, old_text, new_text):
     """True when an edit turns a Python file that PARSED into one that does not.
 
@@ -5256,6 +5359,7 @@ def parse_and_apply(content, repo_path, *, feedback_out=None):
     import re as _re, ast as _ast
     feedback = {} if feedback_out is None else feedback_out
     feedback["last_failures"] = []   # reset per call; read by the retry loop
+    feedback["noop_edits"] = []      # edits skipped because they change nothing; read by the retry loop
     # Coarse reason for the LAST return, read by the retry loop so it can give
     # the model accurate feedback. "invalid_json" is NOT a catch-all: a valid
     # JSON object whose edit anchors simply didn't match the file is a
@@ -5488,6 +5592,10 @@ def parse_and_apply(content, repo_path, *, feedback_out=None):
                     # discarding the edit.
                     _span = _relaxed_edit_span(current, search)
                     if _span:
+                        if filepath.endswith(".py") and _set_duplicate_noop(
+                                current, current[:_span[0]] + str(replace) + current[_span[1]:]):
+                            feedback["noop_edits"].append(filepath)
+                            continue
                         logger.info(f"Edit matched {filepath!r} only after whitespace "
                                     f"normalisation — applying (unique match).")
                         file_contents[full_path] = (current[:_span[0]] + str(replace)
@@ -5500,6 +5608,7 @@ def parse_and_apply(content, repo_path, *, feedback_out=None):
                     _first = (search.strip().splitlines() or [""])[0][:160]
                     _hint = _snippet_language_mismatch_hint(search, filepath)
                     _hint_sfx = f" — {_hint}" if _hint else ""
+                    _hint_sfx += _closest_line_hint(current, search, filepath)
                     _miss.append(f"{filepath}: search snippet not found (starts with: {_first!r}){_hint_sfx}")
                     # _first embedded IN the ERROR line (not left only in _miss/
                     # last_failures): the self-log scanner captures single ERROR
@@ -5511,6 +5620,12 @@ def parse_and_apply(content, repo_path, *, feedback_out=None):
                         f"Edit search snippet not found in {filepath!r}; skipping this edit "
                         f"(search starts with: {_first!r}){_hint_sfx}"
                     )
+                    continue
+                # An edit that only repeats an item a set literal already holds changes nothing.
+                if filepath.endswith(".py") and _set_duplicate_noop(
+                        current, current.replace(search, str(replace))):
+                    feedback["noop_edits"].append(filepath)
+                    logger.warning(f"Edit to {filepath!r} only repeats existing set items; skipping")
                     continue
                 # Several matches: replace them all, with a warning.
                 if count > 1:
@@ -5618,7 +5733,8 @@ def parse_and_apply(content, repo_path, *, feedback_out=None):
             # anchor missed the file (requote the exact text) vs no edits/fixes
             # at all (return a non-empty edits array).
             feedback["last_reason"] = (
-                "edit_anchor_miss" if feedback["last_failures"] else "no_edits")
+                "edit_anchor_miss" if feedback["last_failures"]
+                else "noop_edit" if feedback["noop_edits"] else "no_edits")
             return False, {}, 0.0
         # Success: clear the failure reason.
         feedback["last_reason"] = None
@@ -6092,6 +6208,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             # (kind, detail, confidence, threshold) so the UI can lead with the
             # cause instead of truncating it away.
             last_failure = {}
+            review_rejections = 0  # reviewer Rejects this run, kept apart from pre-review failures
             # Final verdict and confidence; reject by default.
             final_verdict = "Reject"
             final_confidence = 0.0
@@ -6239,7 +6356,9 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         fix_code = apply_ai_fix(path, fix_body, error_context, task_id=issue_id, requirements=reqs, used_model_out=used_model_out,
                                                 retarget=(last_failure.get("kind") == "review_rejected"),
                                                 avoid_paths=sorted(modified_paths),
-                                                local_first=_frontier_rework_local(last_failure, used_model_out))
+                                                local_first=_frontier_rework_local(last_failure, used_model_out),
+                                                cloud_ok=bool(attempt == max_attempts and max_attempts > 1
+                                                              and config.get("fix_frontier_last_attempt", True)))
                         success_applied, fixes, confidence = parse_and_apply(
                             fix_code, path, feedback_out=parse_feedback)
                     # Remember which model built this fix.
@@ -6269,6 +6388,13 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                 "correct indentation) into each \"search\", or use a larger unique "
                                 "anchor. Anchors that did not match: " + _detail)
                             _kind = "edit_anchor_miss"
+                        elif _reason == "noop_edit":
+                            failure_msg = (
+                                "Your edit only repeats items a set already holds in " +
+                                ", ".join(parse_feedback.get("noop_edits") or []) +
+                                ", so it changes nothing. The anchor matched; the cause is elsewhere. "
+                                "Find the real cause or say no code change is needed.")
+                            _kind = "no_edits"
                         elif _reason == "no_edits":
                             failure_msg = (
                                 "The JSON parsed but contained no applicable changes. Return a JSON "
@@ -6389,6 +6515,18 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             # Rejected: pass the critique to the next attempt.
                             if review_verdict == "Reject":
                                 logger.warning(f"Reviewer REJECTED fix for {issue_id}: {critique}")
+                                review_rejections += 1
+                                # A health-check timing/slowness finding that a reviewer rejected usually traces
+                                # to a slow host, not code; hand it to ops instead of burning more pool attempts.
+                                import log_scan
+                                if (config.get("perf_reject_to_ops", True) and review_rejections >= 2
+                                        and attempt == max_attempts
+                                        and log_scan.is_performance_finding(getattr(issue, "title", ""))):
+                                    return _stop_no_code_change(
+                                        issue, issue_id,
+                                        "A reviewer rejected the final code fix (after earlier rejected attempts) for this health-check finding, so the "
+                                        "cause is probably the host or network, not the code. Reviewer: "
+                                        + str(critique or "")[:400], repo_git)
                                 error_context = f"Reviewer rejected the fix: {critique}"
                                 # Record the files this rejected attempt modified so
                                 # the re-targeted retry excludes them (never re-lead

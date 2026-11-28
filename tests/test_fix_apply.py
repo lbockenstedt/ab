@@ -36,7 +36,7 @@ def _load_funcs():
             "_relax_json_fix_strings", "_repair_missing_object_keys",
             "_json_string_spans", "_looks_truncated_json", "_close_truncated_json",
             "_fetch_repo_file_for_review", "_repo_file_text",
-            "_snippet_language_mismatch_hint", "_syntax_regressed",
+            "_snippet_language_mismatch_hint", "_syntax_regressed", "_closest_line_hint", "_set_duplicate_noop", "_repo_grep_context", "_mask_line_values", "_GREP_EXTS",
             "_relaxed_edit_span", "_strip_repo_prefix"}
     want_assign = {"_ISSUE_STOP_TOKENS", "_inflight_lock", "_inflight_issues",
                     "_JSON_BAD_ESCAPE_RE", "_JS_ONLY_TOKENS_RE", "_PY_ONLY_TOKENS_RE",
@@ -120,6 +120,18 @@ def main():
         {"file": "WebUI/main.js", "search": "nonexistent snippet zzz", "replace": "x"}]})
     bad_ok, bad_applied, _ = ns["parse_and_apply"](bad, d)
     ok &= _check("non-matching edit does NOT report success", bad_ok is False and not bad_applied)
+
+    # A matched edit that only repeats a set item is refused with its own reason, not "anchor miss".
+    with open(os.path.join(d, "kc.py"), "w") as kf:
+        kf.write('KEEP = {"GET_AGENTS", "RUN"}\n')
+    noop = json.dumps({"confidence": 0.9, "edits": [
+        {"file": "kc.py", "search": 'KEEP = {"GET_AGENTS", "RUN"}',
+         "replace": 'KEEP = {"GET_AGENTS", "RUN", "GET_AGENTS"}'}]})
+    fb_noop = {}
+    noop_ok, noop_applied, _ = ns["parse_and_apply"](noop, d, feedback_out=fb_noop)
+    ok &= _check("set-duplicate edit is refused with reason noop_edit",
+                 noop_ok is False and fb_noop.get("last_reason") == "noop_edit"
+                 and fb_noop.get("noop_edits") == ["kc.py"])
 
     # ab#206: a response that stops so early it never emits a closing '}'
     # anywhere used to be reported as "no_json" (the LLM-said-nothing case) —

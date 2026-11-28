@@ -2834,6 +2834,8 @@ async def settings_page(request: Request):
     config.setdefault("fix_logdetected_enabled", False)
     config.setdefault("ghost_close_enabled", True)
     config.setdefault("held_requeue_enabled", True)
+    config.setdefault("perf_reject_to_ops", True)
+    config.setdefault("fix_frontier_last_attempt", True)
     config.setdefault("escalation_specific_titles", True)
     # Project skills (skills_loader.py) — repo-committed recipes (add-simulation,
     # dual-copy-guard, ...) AppBuilder follows for fix/build work. Feature
@@ -3800,6 +3802,8 @@ async def save_settings(request: Request):
     config_data["fix_logdetected_enabled"] = data.get("fix_logdetected_enabled") == "on"
     config_data["ghost_close_enabled"] = data.get("ghost_close_enabled") == "on"
     config_data["held_requeue_enabled"] = data.get("held_requeue_enabled") == "on"
+    config_data["perf_reject_to_ops"] = data.get("perf_reject_to_ops") == "on"
+    config_data["fix_frontier_last_attempt"] = data.get("fix_frontier_last_attempt") == "on"
     # Title hub-escalated log issues after the actual problem (log_scan, default on).
     config_data["escalation_specific_titles"] = data.get("escalation_specific_titles") == "on"
     # Hub health check (health_check.py): on/off plus every threshold. A blank or
